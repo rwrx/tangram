@@ -640,26 +640,42 @@ export default class Scene {
 
         // For each tile, only include meshes for the blend order currently being rendered
         // Builds an array tiles and their associated meshes, each as a [tile, meshes] 2-element array
-        let tile_meshes = renderable_tiles
-            .filter(t => typeof proxy_level !== 'number' || t.proxy_level === proxy_level) // optional filter by proxy level
-            .map(t => {
-                if (t.meshes[style_name]) {
-                    return [t, t.meshes[style_name].filter(m => m.variant.blend_order === blend_order)];
-                }
-            })
-            .filter(x => x); // skip tiles with no meshes for this blend order
+        // (uses plain loops to minimize allocations, since this runs for each style every frame)
+        let tile_meshes = [];
 
         // Mesh variants must be rendered in requested order across tiles, to prevent labels that cross
         // tile boundaries from rendering over adjacent tile features meant to be underneath
-        let max_mesh_order =
-            Math.max(...tile_meshes.map(([, meshes]) => {
-                return Math.max(...meshes.map(m => m.variant.mesh_order));
-            }));
+        let max_mesh_order = -Infinity;
+
+        for (let t=0; t < renderable_tiles.length; t++) {
+            const tile = renderable_tiles[t];
+            if (typeof proxy_level === 'number' && tile.proxy_level !== proxy_level) {
+                continue; // optional filter by proxy level
+            }
+
+            const style_meshes = tile.meshes[style_name];
+            if (!style_meshes) {
+                continue; // skip tiles with no meshes for this style
+            }
+
+            const meshes = [];
+            for (let m=0; m < style_meshes.length; m++) {
+                const mesh = style_meshes[m];
+                if (mesh.variant.blend_order === blend_order) {
+                    meshes.push(mesh);
+                    if (mesh.variant.mesh_order > max_mesh_order) {
+                        max_mesh_order = mesh.variant.mesh_order;
+                    }
+                }
+            }
+            tile_meshes.push([tile, meshes]);
+        }
 
         // One pass per mesh variant order (loop goes to max value +1 because 0 is a valid order value)
         for (let mo=0; mo < max_mesh_order + 1; mo++) {
             // Loop over tiles, with meshes pre-filtered by current blend order
-            for (let [tile, meshes] of tile_meshes) {
+            for (let t=0; t < tile_meshes.length; t++) {
+                const [tile, meshes] = tile_meshes[t];
                 let first_for_tile = true;
 
                 // Skip proxy tiles if new tiles have finished loading this style
@@ -668,26 +684,25 @@ export default class Scene {
                     continue;
                 }
 
-                // Filter meshes further by current variant order
-                const order_meshes = meshes.filter(m => m.variant.mesh_order === mo);
-                if (order_meshes.length === 0) {
-                    continue;
-                }
-
-                // Style-specific state
-                // Only setup style if rendering for first time this frame
-                // (lazy init, not all styles will be used in all screen views; some styles might be defined but never used)
-                if (first_for_style === true) {
-                    first_for_style = false;
-                    program = this.setupStyle(style, program_key);
-                    if (!program) {
-                        // no program found, e.g. happens when rendering selection pass, but style doesn't support selection
-                        return 0;
-                    }
-                }
-
                 // Render each mesh (for current variant order)
-                order_meshes.forEach(mesh => {
+                for (let m=0; m < meshes.length; m++) {
+                    const mesh = meshes[m];
+                    if (mesh.variant.mesh_order !== mo) {
+                        continue;
+                    }
+
+                    // Style-specific state
+                    // Only setup style if rendering for first time this frame
+                    // (lazy init, not all styles will be used in all screen views; some styles might be defined but never used)
+                    if (first_for_style === true) {
+                        first_for_style = false;
+                        program = this.setupStyle(style, program_key);
+                        if (!program) {
+                            // no program found, e.g. happens when rendering selection pass, but style doesn't support selection
+                            return 0;
+                        }
+                    }
+
                     // Tile-specific state
                     if (first_for_tile === true) {
                         first_for_tile = false;
@@ -699,7 +714,7 @@ export default class Scene {
                         this.requestRedraw();
                     }
                     render_count += mesh.geometry_count;
-                });
+                }
             }
         }
 

@@ -134,27 +134,40 @@ Geo.copyGeometry = function (geometry) {
 };
 
 // Run an in-place transform function on each cooordinate in a GeoJSON geometry
+// (uses plain loops instead of forEach, since this runs for every coordinate of every tile)
 Geo.transformGeometry = function (geometry, transform) {
     if (geometry == null) {
         return; // skip if missing geometry (valid GeoJSON)
     }
 
+    const coordinates = geometry.coordinates;
     if (geometry.type === 'Point') {
-        transform(geometry.coordinates);
+        transform(coordinates);
     }
     else if (geometry.type === 'LineString' || geometry.type === 'MultiPoint') {
-        geometry.coordinates.forEach(transform);
+        transformCoords(coordinates, transform);
     }
     else if (geometry.type === 'Polygon' || geometry.type === 'MultiLineString') {
-        geometry.coordinates.forEach(ring => ring.forEach(transform));
+        for (let r = 0; r < coordinates.length; r++) {
+            transformCoords(coordinates[r], transform);
+        }
     }
     else if (geometry.type === 'MultiPolygon') {
-        geometry.coordinates.forEach(polygon => {
-            polygon.forEach(ring => ring.forEach(transform));
-        });
+        for (let p = 0; p < coordinates.length; p++) {
+            const polygon = coordinates[p];
+            for (let r = 0; r < polygon.length; r++) {
+                transformCoords(polygon[r], transform);
+            }
+        }
     }
     // TODO: support GeometryCollection
 };
+
+function transformCoords (coords, transform) {
+    for (let c = 0; c < coords.length; c++) {
+        transform(coords[c]);
+    }
+}
 
 Geo.boxIntersect = function (b1, b2) {
     return !(

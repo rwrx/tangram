@@ -176,7 +176,7 @@ function buildPolyline(line, context){
 
     // INTERMEDIARY POINTS
     if (has_texcoord) {
-        v += v_scale * Vector.length(Vector.sub(coordNext, coordCurr));
+        v += v_scale * segmentLength(coordCurr, coordNext);
     }
 
     for (var i = index_start + 1; i < index_end; i++) {
@@ -217,7 +217,7 @@ function buildPolyline(line, context){
         }
 
         if (has_texcoord) {
-            v += v_scale * Vector.length(Vector.sub(coordNext, coordCurr));
+            v += v_scale * segmentLength(coordCurr, coordNext);
         }
     }
 
@@ -319,10 +319,36 @@ function endPolygon(coordCurr, normPrev, normNext, join_type, v, context) {
     }
 }
 
+// Length of the segment between two coordinates (includes z if present, matching Vector.length(Vector.sub(b, a)))
+function segmentLength(a, b) {
+    var dx = b[0] - a[0];
+    var dy = b[1] - a[1];
+    if (a.length >= 3 && b.length >= 3) {
+        var dz = b[2] - a[2];
+        return Math.sqrt(dx*dx + dy*dy + dz*dz);
+    }
+    return Math.sqrt(dx*dx + dy*dy);
+}
+
+// Inlined equivalent of normalizing (normPrev + normNext) and scaling it, to avoid intermediate allocations
 function createMiterVec(normPrev, normNext) {
-    var miterVec = Vector.normalize(Vector.add(normPrev, normNext));
-    var scale = 2 / (1 + Math.abs(Vector.dot(normPrev, miterVec)));
-    return Vector.mult(miterVec, scale * scale);
+    var x = normPrev[0] + normNext[0];
+    var y = normPrev[1] + normNext[1];
+    var d = x*x + y*y;
+    if (d !== 1) {
+        d = Math.sqrt(d);
+        if (d !== 0) {
+            x /= d;
+            y /= d;
+        }
+        else {
+            x = 0;
+            y = 0;
+        }
+    }
+    var scale = 2 / (1 + Math.abs(normPrev[0] * x + normPrev[1] * y));
+    scale *= scale;
+    return [x * scale, y * scale];
 }
 
 // Add a miter vector or a join if the miter is too sharp
@@ -454,6 +480,7 @@ function addVertex(position, extrude, normal, u, v, context, flip) {
 //                                             \./
 //                                              C
 var uvCurr = [0, 0];
+var blade = [0, 0]; // reusable instance for fan extrusion vector
 
 function addFan (coord, eA, eC, eB, normal, uvA, uvC, uvB, isCap, isBevel, context) {
     // eA = extrusion vector of first outer vertex
@@ -490,7 +517,7 @@ function addFan (coord, eA, eC, eB, normal, uvA, uvC, uvB, isCap, isBevel, conte
         addVertex(coord, eA, normal, uvA[0], uvA[1], context, 1);
     }
 
-    var blade = eA;
+    var blade_x = eA[0], blade_y = eA[1];
 
     var has_texcoord = (context.texcoord_index != null);
     if (has_texcoord) {
@@ -504,6 +531,9 @@ function addFan (coord, eA, eC, eB, normal, uvA, uvC, uvB, isCap, isBevel, conte
     }
 
     var angle_step = angle / numTriangles;
+    var cos_step = Math.cos(angle_step); // rotation is constant for each step of the fan
+    var sin_step = Math.sin(angle_step);
+    var rot_x, rot_y;
     let flip = ((angle < 0) ? -1 : 1); // if angle < 0, is cw - set 'flip' flag
 
     // add outside vertices in reverse order depending on sign of angle
@@ -520,21 +550,29 @@ function addFan (coord, eA, eC, eB, normal, uvA, uvC, uvB, isCap, isBevel, conte
     for (var i = 0; i < numTriangles; i++) {
         if (i === 0 && angle < 0) {
             // if ccw, flip the extrusion vector so offsets work properly
-            blade = Vector.neg(blade);
+            blade_x = -blade_x;
+            blade_y = -blade_y;
         }
 
-        blade = Vector.rot(blade, angle_step);
+        rot_x = blade_x * cos_step - blade_y * sin_step;
+        rot_y = blade_x * sin_step + blade_y * cos_step;
+        blade_x = blade[0] = rot_x;
+        blade_y = blade[1] = rot_y;
 
         if (has_texcoord) {
             if (isCap){
                 // UV textures go "through" the cap
-                affine_uvCurr = Vector.rot(affine_uvCurr, angle_step);
+                rot_x = affine_uvCurr[0] * cos_step - affine_uvCurr[1] * sin_step;
+                rot_y = affine_uvCurr[0] * sin_step + affine_uvCurr[1] * cos_step;
+                affine_uvCurr[0] = rot_x;
+                affine_uvCurr[1] = rot_y;
                 uvCurr[0] = affine_uvCurr[0] + uvC[0];
                 uvCurr[1] = affine_uvCurr[1] * context.texcoord_width * context.v_scale + uvC[1]; // scale the v-coordinate
             }
             else {
-                // UV textures go "around" the join
-                uvCurr = Vector.add(uvCurr, uv_delta);
+                // UV textures go "around" the join (uvCurr is a fresh copy, safe to update in place)
+                uvCurr[0] = uvCurr[0] + uv_delta[0];
+                uvCurr[1] = uvCurr[1] + uv_delta[1];
             }
         }
 

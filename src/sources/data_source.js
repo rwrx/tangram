@@ -152,20 +152,26 @@ export default class DataSource {
 
         return this._load(dest).then((dest) => {
             // Post-processing
+            // Transform is created once per tile (instead of per feature), with constant scale factors pre-computed
+            const pad_scale = this.pad_scale;
+            const pad_mult = 1 + pad_scale;
+            const pad_offset = (Geo.tile_scale * pad_scale/2);
+            const transform = pad_scale ?
+                coord => {
+                    // Flip Y coords, and slightly scale up tile to cover seams
+                    coord[0] = Math.round(coord[0] * pad_mult - pad_offset);
+                    coord[1] = Math.round(-coord[1] * pad_mult - pad_offset);
+                } :
+                coord => {
+                    // Flip Y coords
+                    coord[1] = -coord[1];
+                };
+
             for (let layer in dest.source_data.layers) {
                 let data = dest.source_data.layers[layer];
                 if (data && data.features) {
                     data.features.forEach(feature => {
-                        Geo.transformGeometry(feature.geometry, coord => {
-                            // Flip Y coords
-                            coord[1] = -coord[1];
-
-                            // Slightly scale up tile to cover seams
-                            if (this.pad_scale) {
-                                coord[0] = Math.round(coord[0] * (1 + this.pad_scale) - (Geo.tile_scale * this.pad_scale/2));
-                                coord[1] = Math.round(coord[1] * (1 + this.pad_scale) - (Geo.tile_scale * this.pad_scale/2));
-                            }
-                        });
+                        Geo.transformGeometry(feature.geometry, transform);
 
                         // Use first encountered polygon winding order as default for data source
                         this.updateDefaultWinding(feature.geometry);

@@ -14,6 +14,7 @@ export default class VertexLayout {
         this.index = {};        // JS buffer index of each attribute component, e.g. this.index.position
         this.offset = {};       // VBO buffer byte offset of each attribute component, e.g. this.offset.color
         this.stride = 0;        // byte stride of a single vertex
+        this.view_types = [];   // unique GL types of dynamic attributes, in sorted order
 
         let index = 0, count = 0;
         for (let a=0; a < this.attribs.length; a++) {
@@ -62,6 +63,12 @@ export default class VertexLayout {
 
                 // Store byte offset of each attribute by name
                 this.offset[attrib.name] = attrib.offset;
+
+                // Track unique GL types (in sorted order), used to index typed array views when adding vertices
+                if (this.view_types.indexOf(attrib.type) === -1) {
+                    this.view_types.push(attrib.type);
+                    this.view_types.sort((a, b) => a - b);
+                }
             }
             // Static attribute
             else {
@@ -128,7 +135,7 @@ export default class VertexLayout {
             // `t` = current typed array to write to
             // `o` = current offset into VBO, in current type size (e.g. divide 2 for shorts, divide by 4 for floats, etc.)
             // `v` = plain JS array containing vertex data
-            // `vs` = typed arrays (one per GL type needed for this vertex layout)
+            // `vs` = dense list of typed arrays (one per GL type needed for this vertex layout, see `view_types`)
             // `off` = current offset into VBO, in bytes
             let src = ['var t, o;'];
 
@@ -141,7 +148,7 @@ export default class VertexLayout {
                 let component = components[c];
 
                 if (last_type !== component.type) {
-                    src.push(`t = vs[${component.type}];`);
+                    src.push(`t = vs[${this.view_types.indexOf(component.type)}];`);
                     src.push(`o = off${component.shift ? ' >> ' + component.shift : ''};`);
                     last_type = component.type;
                 }

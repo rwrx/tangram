@@ -1,12 +1,9 @@
 // Polygon builders
 import Geo from '../utils/geo';
-import Vector from '../utils/vector';
 import { default_uvs, outsideTile } from './common';
 
 import earcut from 'earcut';
 import quickselect from 'quickselect';
-
-const up_vec3 = [0, 0, 1];
 
 
 /**
@@ -151,27 +148,34 @@ export function buildExtrudedPolygons (
                     w1 = w;
                 }
 
-                // Two triangles for the quad formed by each vertex pair, going from bottom to top height
-                var wall_vertices = [
-                    [contour[w1][0], contour[w1][1], max_z],
-                    [contour[w1][0], contour[w1][1], min_z],
-                    [contour[w0][0], contour[w0][1], min_z],
-                    [contour[w0][0], contour[w0][1], max_z]
-                ];
-
                 // Calc the normal of the wall from up vector and one segment of the wall triangles
-                let wall_vec = Vector.normalize([contour[w1][0] - contour[w0][0], contour[w1][1] - contour[w0][1], 0]);
-                let normal = Vector.cross(up_vec3, wall_vec);
+                // (inlined normalize + cross product with up vector, to avoid allocations)
+                let x0 = contour[w0][0], y0 = contour[w0][1];
+                let x1 = contour[w1][0], y1 = contour[w1][1];
+                let wall_x = x1 - x0, wall_y = y1 - y0;
+                let wall_len = wall_x * wall_x + wall_y * wall_y;
+                if (wall_len !== 1) {
+                    wall_len = Math.sqrt(wall_len);
+                    if (wall_len !== 0) {
+                        wall_x /= wall_len;
+                        wall_y /= wall_len;
+                    }
+                    else {
+                        wall_x = 0;
+                        wall_y = 0;
+                    }
+                }
 
                 // Update vertex template with current surface normal
-                vertex_template[normal_index + 0] = normal[0] * normal_normalize;
-                vertex_template[normal_index + 1] = normal[1] * normal_normalize;
-                vertex_template[normal_index + 2] = normal[2] * normal_normalize;
+                vertex_template[normal_index + 0] = (0 - wall_y) * normal_normalize;
+                vertex_template[normal_index + 1] = wall_x * normal_normalize;
+                vertex_template[normal_index + 2] = 0;
 
-                for (var wv=0; wv < wall_vertices.length; wv++) {
-                    vertex_template[0] = wall_vertices[wv][0];
-                    vertex_template[1] = wall_vertices[wv][1];
-                    vertex_template[2] = wall_vertices[wv][2];
+                // Two triangles for the quad formed by each vertex pair, going from bottom to top height
+                for (var wv=0; wv < 4; wv++) {
+                    vertex_template[0] = (wv < 2) ? x1 : x0;
+                    vertex_template[1] = (wv < 2) ? y1 : y0;
+                    vertex_template[2] = (wv === 0 || wv === 3) ? max_z : min_z;
 
                     if (texcoord_index) {
                         vertex_template[texcoord_index + 0] = texcoords[wv][0] * texcoord_normalize;

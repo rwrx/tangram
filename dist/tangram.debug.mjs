@@ -2889,23 +2889,35 @@ Geo.copyGeometry = function (geometry) {
 };
 
 // Run an in-place transform function on each cooordinate in a GeoJSON geometry
+// (uses plain loops instead of forEach, since this runs for every coordinate of every tile)
 Geo.transformGeometry = function (geometry, transform) {
   if (geometry == null) {
     return; // skip if missing geometry (valid GeoJSON)
   }
+  const coordinates = geometry.coordinates;
   if (geometry.type === 'Point') {
-    transform(geometry.coordinates);
+    transform(coordinates);
   } else if (geometry.type === 'LineString' || geometry.type === 'MultiPoint') {
-    geometry.coordinates.forEach(transform);
+    transformCoords(coordinates, transform);
   } else if (geometry.type === 'Polygon' || geometry.type === 'MultiLineString') {
-    geometry.coordinates.forEach(ring => ring.forEach(transform));
+    for (let r = 0; r < coordinates.length; r++) {
+      transformCoords(coordinates[r], transform);
+    }
   } else if (geometry.type === 'MultiPolygon') {
-    geometry.coordinates.forEach(polygon => {
-      polygon.forEach(ring => ring.forEach(transform));
-    });
+    for (let p = 0; p < coordinates.length; p++) {
+      const polygon = coordinates[p];
+      for (let r = 0; r < polygon.length; r++) {
+        transformCoords(polygon[r], transform);
+      }
+    }
   }
   // TODO: support GeometryCollection
 };
+function transformCoords(coords, transform) {
+  for (let c = 0; c < coords.length; c++) {
+    transform(coords[c]);
+  }
+}
 Geo.boxIntersect = function (b1, b2) {
   return !(b2.sw.x > b1.ne.x || b2.ne.x < b1.sw.x || b2.sw.y > b1.ne.y || b2.ne.y < b1.sw.y);
 };
@@ -5620,20 +5632,23 @@ class DataSource {
 
     return this._load(dest).then(dest => {
       // Post-processing
+      // Transform is created once per tile (instead of per feature), with constant scale factors pre-computed
+      const pad_scale = this.pad_scale;
+      const pad_mult = 1 + pad_scale;
+      const pad_offset = Geo$1.tile_scale * pad_scale / 2;
+      const transform = pad_scale ? coord => {
+        // Flip Y coords, and slightly scale up tile to cover seams
+        coord[0] = Math.round(coord[0] * pad_mult - pad_offset);
+        coord[1] = Math.round(-coord[1] * pad_mult - pad_offset);
+      } : coord => {
+        // Flip Y coords
+        coord[1] = -coord[1];
+      };
       for (let layer in dest.source_data.layers) {
         let data = dest.source_data.layers[layer];
         if (data && data.features) {
           data.features.forEach(feature => {
-            Geo$1.transformGeometry(feature.geometry, coord => {
-              // Flip Y coords
-              coord[1] = -coord[1];
-
-              // Slightly scale up tile to cover seams
-              if (this.pad_scale) {
-                coord[0] = Math.round(coord[0] * (1 + this.pad_scale) - Geo$1.tile_scale * this.pad_scale / 2);
-                coord[1] = Math.round(coord[1] * (1 + this.pad_scale) - Geo$1.tile_scale * this.pad_scale / 2);
-              }
-            });
+            Geo$1.transformGeometry(feature.geometry, transform);
 
             // Use first encountered polygon winding order as default for data source
             this.updateDefaultWinding(feature.geometry);
@@ -7266,9 +7281,14 @@ function addLayerDebugEntry(target, layer, faeture_count, geom_count, styles, ba
 
 let MAX_VALUE = Math.pow(2, 16) - 1;
 let has_element_index_uint = false;
+const INITIAL_SIZE = 1024;
+
+// Element indices are written directly into a growable typed array (Uint16 until a value overflows,
+// then upgraded to Uint32 if supported), avoiding a plain JS array and a final copy into a typed array
 class VertexElements {
   constructor() {
-    this.array = [];
+    this.array = new Uint16Array(INITIAL_SIZE);
+    this.length = 0;
     this.has_overflown = false;
   }
   push(value) {
@@ -7278,18 +7298,29 @@ class VertexElements {
     }
 
     // Trigger overflow if value is greater than Uint16 max
-    if (value > MAX_VALUE) {
+    if (value > MAX_VALUE && !this.has_overflown) {
       this.has_overflown = true;
       if (!has_element_index_uint) {
         return;
       }
+      this.resize(this.array.length, Uint32Array); // upgrade storage to fit larger indices
     }
-    this.array.push(value);
+    if (this.length === this.array.length) {
+      this.resize(this.array.length * 2, this.array.constructor);
+    }
+    this.array[this.length++] = value;
+  }
+  resize(size, ArrayType) {
+    const array = new ArrayType(size);
+    array.set(this.array.subarray(0, this.length));
+    this.array = array;
   }
   end() {
-    if (this.array.length) {
-      let buffer = createBuffer(this.array, this.has_overflown);
-      this.array = [];
+    if (this.length) {
+      // copy to exact size, so that only the used portion is sent to main thread and GPU
+      let buffer = this.array.slice(0, this.length);
+      this.array = new Uint16Array(INITIAL_SIZE);
+      this.length = 0;
       this.has_overflown = false;
       return buffer;
     } else {
@@ -7300,10 +7331,6 @@ class VertexElements {
 VertexElements.setElementIndexUint = function (flag) {
   has_element_index_uint = flag;
 };
-function createBuffer(array, overflown) {
-  var typedArray = overflown && has_element_index_uint ? Uint32Array : Uint16Array;
-  return new typedArray(array);
-}
 
 // Maps GL types to JS array types
 let array_types = {
@@ -7354,6 +7381,9 @@ class VertexData {
         this.views[attrib.type] = new array_type(this.vertex_buffer.buffer);
       }
     });
+
+    // Dense list of views, indexed by the vertex layout's add vertex function (faster than keyed GL type look-up)
+    this.view_list = this.vertex_layout.view_types.map(type => this.views[type]);
   }
 
   // Check allocated buffer size, expand/realloc buffer if needed
@@ -7379,8 +7409,10 @@ class VertexData {
 
   // Add a vertex, copied from a plain JS array of elements matching the order of the vertex layout
   addVertex(vertex) {
-    this.checkBufferSize();
-    this.vertexLayoutAddVertex(vertex, this.views, this.offset);
+    if (this.offset + this.stride > this.byte_length) {
+      this.checkBufferSize();
+    }
+    this.vertexLayoutAddVertex(vertex, this.view_list, this.offset);
     this.offset += this.stride;
     this.vertex_count++;
   }
@@ -7408,6 +7440,7 @@ class VertexLayout {
     this.index = {}; // JS buffer index of each attribute component, e.g. this.index.position
     this.offset = {}; // VBO buffer byte offset of each attribute component, e.g. this.offset.color
     this.stride = 0; // byte stride of a single vertex
+    this.view_types = []; // unique GL types of dynamic attributes, in sorted order
 
     let index = 0,
       count = 0;
@@ -7457,6 +7490,12 @@ class VertexLayout {
 
         // Store byte offset of each attribute by name
         this.offset[attrib.name] = attrib.offset;
+
+        // Track unique GL types (in sorted order), used to index typed array views when adding vertices
+        if (this.view_types.indexOf(attrib.type) === -1) {
+          this.view_types.push(attrib.type);
+          this.view_types.sort((a, b) => a - b);
+        }
       }
       // Static attribute
       else {
@@ -7522,7 +7561,7 @@ class VertexLayout {
       // `t` = current typed array to write to
       // `o` = current offset into VBO, in current type size (e.g. divide 2 for shorts, divide by 4 for floats, etc.)
       // `v` = plain JS array containing vertex data
-      // `vs` = typed arrays (one per GL type needed for this vertex layout)
+      // `vs` = dense list of typed arrays (one per GL type needed for this vertex layout, see `view_types`)
       // `off` = current offset into VBO, in bytes
       let src = ['var t, o;'];
 
@@ -7533,7 +7572,7 @@ class VertexLayout {
       for (let c = 0; c < components.length; c++) {
         let component = components[c];
         if (last_type !== component.type) {
-          src.push(`t = vs[${component.type}];`);
+          src.push(`t = vs[${this.view_types.indexOf(component.type)}];`);
           src.push(`o = off${component.shift ? ' >> ' + component.shift : ''};`);
           last_type = component.type;
         }
@@ -8350,7 +8389,6 @@ function defaultCompare(a, b) {
 }
 
 // Polygon builders
-const up_vec3 = [0, 0, 1];
 
 /**
  * To tesselate flat 2D polygons.
@@ -8478,21 +8516,36 @@ function buildExtrudedPolygons(polygons, z, height, min_height, vertex_data, ver
           w1 = w;
         }
 
-        // Two triangles for the quad formed by each vertex pair, going from bottom to top height
-        var wall_vertices = [[contour[w1][0], contour[w1][1], max_z], [contour[w1][0], contour[w1][1], min_z], [contour[w0][0], contour[w0][1], min_z], [contour[w0][0], contour[w0][1], max_z]];
-
         // Calc the normal of the wall from up vector and one segment of the wall triangles
-        let wall_vec = Vector$1.normalize([contour[w1][0] - contour[w0][0], contour[w1][1] - contour[w0][1], 0]);
-        let normal = Vector$1.cross(up_vec3, wall_vec);
+        // (inlined normalize + cross product with up vector, to avoid allocations)
+        let x0 = contour[w0][0],
+          y0 = contour[w0][1];
+        let x1 = contour[w1][0],
+          y1 = contour[w1][1];
+        let wall_x = x1 - x0,
+          wall_y = y1 - y0;
+        let wall_len = wall_x * wall_x + wall_y * wall_y;
+        if (wall_len !== 1) {
+          wall_len = Math.sqrt(wall_len);
+          if (wall_len !== 0) {
+            wall_x /= wall_len;
+            wall_y /= wall_len;
+          } else {
+            wall_x = 0;
+            wall_y = 0;
+          }
+        }
 
         // Update vertex template with current surface normal
-        vertex_template[normal_index + 0] = normal[0] * normal_normalize;
-        vertex_template[normal_index + 1] = normal[1] * normal_normalize;
-        vertex_template[normal_index + 2] = normal[2] * normal_normalize;
-        for (var wv = 0; wv < wall_vertices.length; wv++) {
-          vertex_template[0] = wall_vertices[wv][0];
-          vertex_template[1] = wall_vertices[wv][1];
-          vertex_template[2] = wall_vertices[wv][2];
+        vertex_template[normal_index + 0] = (0 - wall_y) * normal_normalize;
+        vertex_template[normal_index + 1] = wall_x * normal_normalize;
+        vertex_template[normal_index + 2] = 0;
+
+        // Two triangles for the quad formed by each vertex pair, going from bottom to top height
+        for (var wv = 0; wv < 4; wv++) {
+          vertex_template[0] = wv < 2 ? x1 : x0;
+          vertex_template[1] = wv < 2 ? y1 : y0;
+          vertex_template[2] = wv === 0 || wv === 3 ? max_z : min_z;
           if (texcoord_index) {
             vertex_template[texcoord_index + 0] = texcoords[wv][0] * texcoord_normalize;
             vertex_template[texcoord_index + 1] = texcoords[wv][1] * texcoord_normalize;
@@ -9190,7 +9243,7 @@ function buildPolyline(line, context) {
 
   // INTERMEDIARY POINTS
   if (has_texcoord) {
-    v += v_scale * Vector$1.length(Vector$1.sub(coordNext, coordCurr));
+    v += v_scale * segmentLength(coordCurr, coordNext);
   }
   for (var i = index_start + 1; i < index_end; i++) {
     var currIndex = i;
@@ -9225,7 +9278,7 @@ function buildPolyline(line, context) {
       addJoin(join_type, v, coordCurr, normPrev, normNext, false, context);
     }
     if (has_texcoord) {
-      v += v_scale * Vector$1.length(Vector$1.sub(coordNext, coordCurr));
+      v += v_scale * segmentLength(coordCurr, coordNext);
     }
   }
 
@@ -9313,10 +9366,36 @@ function endPolygon(coordCurr, normPrev, normNext, join_type, v, context) {
     }
   }
 }
+
+// Length of the segment between two coordinates (includes z if present, matching Vector.length(Vector.sub(b, a)))
+function segmentLength(a, b) {
+  var dx = b[0] - a[0];
+  var dy = b[1] - a[1];
+  if (a.length >= 3 && b.length >= 3) {
+    var dz = b[2] - a[2];
+    return Math.sqrt(dx * dx + dy * dy + dz * dz);
+  }
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+// Inlined equivalent of normalizing (normPrev + normNext) and scaling it, to avoid intermediate allocations
 function createMiterVec(normPrev, normNext) {
-  var miterVec = Vector$1.normalize(Vector$1.add(normPrev, normNext));
-  var scale = 2 / (1 + Math.abs(Vector$1.dot(normPrev, miterVec)));
-  return Vector$1.mult(miterVec, scale * scale);
+  var x = normPrev[0] + normNext[0];
+  var y = normPrev[1] + normNext[1];
+  var d = x * x + y * y;
+  if (d !== 1) {
+    d = Math.sqrt(d);
+    if (d !== 0) {
+      x /= d;
+      y /= d;
+    } else {
+      x = 0;
+      y = 0;
+    }
+  }
+  var scale = 2 / (1 + Math.abs(normPrev[0] * x + normPrev[1] * y));
+  scale *= scale;
+  return [x * scale, y * scale];
 }
 
 // Add a miter vector or a join if the miter is too sharp
@@ -9432,6 +9511,8 @@ function addVertex(position, extrude, normal, u, v, context, flip) {
 //                                             \./
 //                                              C
 var uvCurr = [0, 0];
+var blade = [0, 0]; // reusable instance for fan extrusion vector
+
 function addFan(coord, eA, eC, eB, normal, uvA, uvC, uvB, isCap, isBevel, context) {
   // eA = extrusion vector of first outer vertex
   // eC = extrusion vector of inner vertex
@@ -9465,7 +9546,8 @@ function addFan(coord, eA, eC, eB, normal, uvA, uvC, uvB, isCap, isBevel, contex
     addVertex(coord, eC, normal, uvC[0], uvC[1], context, 1);
     addVertex(coord, eA, normal, uvA[0], uvA[1], context, 1);
   }
-  var blade = eA;
+  var blade_x = eA[0],
+    blade_y = eA[1];
   var has_texcoord = context.texcoord_index != null;
   if (has_texcoord) {
     if (isCap) {
@@ -9476,6 +9558,9 @@ function addFan(coord, eA, eC, eB, normal, uvA, uvC, uvB, isCap, isBevel, contex
     }
   }
   var angle_step = angle / numTriangles;
+  var cos_step = Math.cos(angle_step); // rotation is constant for each step of the fan
+  var sin_step = Math.sin(angle_step);
+  var rot_x, rot_y;
   let flip = angle < 0 ? -1 : 1; // if angle < 0, is cw - set 'flip' flag
 
   // add outside vertices in reverse order depending on sign of angle
@@ -9490,18 +9575,26 @@ function addFan(coord, eA, eC, eB, normal, uvA, uvC, uvB, isCap, isBevel, contex
   for (var i = 0; i < numTriangles; i++) {
     if (i === 0 && angle < 0) {
       // if ccw, flip the extrusion vector so offsets work properly
-      blade = Vector$1.neg(blade);
+      blade_x = -blade_x;
+      blade_y = -blade_y;
     }
-    blade = Vector$1.rot(blade, angle_step);
+    rot_x = blade_x * cos_step - blade_y * sin_step;
+    rot_y = blade_x * sin_step + blade_y * cos_step;
+    blade_x = blade[0] = rot_x;
+    blade_y = blade[1] = rot_y;
     if (has_texcoord) {
       if (isCap) {
         // UV textures go "through" the cap
-        affine_uvCurr = Vector$1.rot(affine_uvCurr, angle_step);
+        rot_x = affine_uvCurr[0] * cos_step - affine_uvCurr[1] * sin_step;
+        rot_y = affine_uvCurr[0] * sin_step + affine_uvCurr[1] * cos_step;
+        affine_uvCurr[0] = rot_x;
+        affine_uvCurr[1] = rot_y;
         uvCurr[0] = affine_uvCurr[0] + uvC[0];
         uvCurr[1] = affine_uvCurr[1] * context.texcoord_width * context.v_scale + uvC[1]; // scale the v-coordinate
       } else {
-        // UV textures go "around" the join
-        uvCurr = Vector$1.add(uvCurr, uv_delta);
+        // UV textures go "around" the join (uvCurr is a fresh copy, safe to update in place)
+        uvCurr[0] = uvCurr[0] + uv_delta[0];
+        uvCurr[1] = uvCurr[1] + uv_delta[1];
       }
     }
     addVertex(coord, blade, normal, uvCurr[0], uvCurr[1], context, flip);
@@ -28880,23 +28973,39 @@ class Scene {
 
     // For each tile, only include meshes for the blend order currently being rendered
     // Builds an array tiles and their associated meshes, each as a [tile, meshes] 2-element array
-    let tile_meshes = renderable_tiles.filter(t => typeof proxy_level !== 'number' || t.proxy_level === proxy_level) // optional filter by proxy level
-    .map(t => {
-      if (t.meshes[style_name]) {
-        return [t, t.meshes[style_name].filter(m => m.variant.blend_order === blend_order)];
-      }
-    }).filter(x => x); // skip tiles with no meshes for this blend order
+    // (uses plain loops to minimize allocations, since this runs for each style every frame)
+    let tile_meshes = [];
 
     // Mesh variants must be rendered in requested order across tiles, to prevent labels that cross
     // tile boundaries from rendering over adjacent tile features meant to be underneath
-    let max_mesh_order = Math.max(...tile_meshes.map(([, meshes]) => {
-      return Math.max(...meshes.map(m => m.variant.mesh_order));
-    }));
+    let max_mesh_order = -Infinity;
+    for (let t = 0; t < renderable_tiles.length; t++) {
+      const tile = renderable_tiles[t];
+      if (typeof proxy_level === 'number' && tile.proxy_level !== proxy_level) {
+        continue; // optional filter by proxy level
+      }
+      const style_meshes = tile.meshes[style_name];
+      if (!style_meshes) {
+        continue; // skip tiles with no meshes for this style
+      }
+      const meshes = [];
+      for (let m = 0; m < style_meshes.length; m++) {
+        const mesh = style_meshes[m];
+        if (mesh.variant.blend_order === blend_order) {
+          meshes.push(mesh);
+          if (mesh.variant.mesh_order > max_mesh_order) {
+            max_mesh_order = mesh.variant.mesh_order;
+          }
+        }
+      }
+      tile_meshes.push([tile, meshes]);
+    }
 
     // One pass per mesh variant order (loop goes to max value +1 because 0 is a valid order value)
     for (let mo = 0; mo < max_mesh_order + 1; mo++) {
       // Loop over tiles, with meshes pre-filtered by current blend order
-      for (let [tile, meshes] of tile_meshes) {
+      for (let t = 0; t < tile_meshes.length; t++) {
+        const [tile, meshes] = tile_meshes[t];
         let first_for_tile = true;
 
         // Skip proxy tiles if new tiles have finished loading this style
@@ -28905,26 +29014,25 @@ class Scene {
           continue;
         }
 
-        // Filter meshes further by current variant order
-        const order_meshes = meshes.filter(m => m.variant.mesh_order === mo);
-        if (order_meshes.length === 0) {
-          continue;
-        }
-
-        // Style-specific state
-        // Only setup style if rendering for first time this frame
-        // (lazy init, not all styles will be used in all screen views; some styles might be defined but never used)
-        if (first_for_style === true) {
-          first_for_style = false;
-          program = this.setupStyle(style, program_key);
-          if (!program) {
-            // no program found, e.g. happens when rendering selection pass, but style doesn't support selection
-            return 0;
-          }
-        }
-
         // Render each mesh (for current variant order)
-        order_meshes.forEach(mesh => {
+        for (let m = 0; m < meshes.length; m++) {
+          const mesh = meshes[m];
+          if (mesh.variant.mesh_order !== mo) {
+            continue;
+          }
+
+          // Style-specific state
+          // Only setup style if rendering for first time this frame
+          // (lazy init, not all styles will be used in all screen views; some styles might be defined but never used)
+          if (first_for_style === true) {
+            first_for_style = false;
+            program = this.setupStyle(style, program_key);
+            if (!program) {
+              // no program found, e.g. happens when rendering selection pass, but style doesn't support selection
+              return 0;
+            }
+          }
+
           // Tile-specific state
           if (first_for_tile === true) {
             first_for_tile = false;
@@ -28936,7 +29044,7 @@ class Scene {
             this.requestRedraw();
           }
           render_count += mesh.geometry_count;
-        });
+        }
       }
     }
     return render_count;
@@ -30281,7 +30389,7 @@ return index;
 // Script modules can't expose exports
 try {
 	Tangram.debug.ESM = true; // mark build as ES module
-	Tangram.debug.SHA = 'd0b887d09a3645aad91a18bd3bd0362d74627da3';
+	Tangram.debug.SHA = 'f24f47cdfa825fb4d20b639730ce2f384e2e76c4';
 	if (true === true && typeof window === 'object') {
 	    window.Tangram = Tangram;
 	}

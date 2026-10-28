@@ -52,6 +52,9 @@ export default class VertexData {
                 this.views[attrib.type] = new array_type(this.vertex_buffer.buffer);
             }
         });
+
+        // Dense list of views, indexed by the vertex layout's add vertex function (faster than keyed GL type look-up)
+        this.view_list = this.vertex_layout.view_types.map(type => this.views[type]);
     }
 
     // Check allocated buffer size, expand/realloc buffer if needed
@@ -77,8 +80,10 @@ export default class VertexData {
 
     // Add a vertex, copied from a plain JS array of elements matching the order of the vertex layout
     addVertex (vertex) {
-        this.checkBufferSize();
-        this.vertexLayoutAddVertex(vertex, this.views, this.offset);
+        if ((this.offset + this.stride) > this.byte_length) {
+            this.checkBufferSize();
+        }
+        this.vertexLayoutAddVertex(vertex, this.view_list, this.offset);
         this.offset += this.stride;
         this.vertex_count++;
     }
