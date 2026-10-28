@@ -177,7 +177,7 @@ function _createClass(e, r, t) {
   }), e;
 }
 
-var version$1 = "0.22.0";
+var version$1 = "0.23.0";
 
 var version = 'v' + version$1;
 
@@ -3167,27 +3167,35 @@ Geo.copyGeometry = function (geometry) {
 };
 
 // Run an in-place transform function on each cooordinate in a GeoJSON geometry
+// (uses plain loops instead of forEach, since this runs for every coordinate of every tile)
 Geo.transformGeometry = function (geometry, transform) {
   if (geometry == null) {
     return; // skip if missing geometry (valid GeoJSON)
   }
+  var coordinates = geometry.coordinates;
   if (geometry.type === 'Point') {
-    transform(geometry.coordinates);
+    transform(coordinates);
   } else if (geometry.type === 'LineString' || geometry.type === 'MultiPoint') {
-    geometry.coordinates.forEach(transform);
+    transformCoords(coordinates, transform);
   } else if (geometry.type === 'Polygon' || geometry.type === 'MultiLineString') {
-    geometry.coordinates.forEach(function (ring) {
-      return ring.forEach(transform);
-    });
+    for (var r = 0; r < coordinates.length; r++) {
+      transformCoords(coordinates[r], transform);
+    }
   } else if (geometry.type === 'MultiPolygon') {
-    geometry.coordinates.forEach(function (polygon) {
-      polygon.forEach(function (ring) {
-        return ring.forEach(transform);
-      });
-    });
+    for (var p = 0; p < coordinates.length; p++) {
+      var polygon = coordinates[p];
+      for (var _r = 0; _r < polygon.length; _r++) {
+        transformCoords(polygon[_r], transform);
+      }
+    }
   }
   // TODO: support GeometryCollection
 };
+function transformCoords(coords, transform) {
+  for (var c = 0; c < coords.length; c++) {
+    transform(coords[c]);
+  }
+}
 Geo.boxIntersect = function (b1, b2) {
   return !(b2.sw.x > b1.ne.x || b2.ne.x < b1.sw.x || b2.sw.y > b1.ne.y || b2.ne.y < b1.sw.y);
 };
@@ -6052,20 +6060,23 @@ var DataSource = /*#__PURE__*/function () {
 
       return this._load(dest).then(function (dest) {
         // Post-processing
+        // Transform is created once per tile (instead of per feature), with constant scale factors pre-computed
+        var pad_scale = _this2.pad_scale;
+        var pad_mult = 1 + pad_scale;
+        var pad_offset = Geo$1.tile_scale * pad_scale / 2;
+        var transform = pad_scale ? function (coord) {
+          // Flip Y coords, and slightly scale up tile to cover seams
+          coord[0] = Math.round(coord[0] * pad_mult - pad_offset);
+          coord[1] = Math.round(-coord[1] * pad_mult - pad_offset);
+        } : function (coord) {
+          // Flip Y coords
+          coord[1] = -coord[1];
+        };
         for (var layer in dest.source_data.layers) {
           var data = dest.source_data.layers[layer];
           if (data && data.features) {
             data.features.forEach(function (feature) {
-              Geo$1.transformGeometry(feature.geometry, function (coord) {
-                // Flip Y coords
-                coord[1] = -coord[1];
-
-                // Slightly scale up tile to cover seams
-                if (_this2.pad_scale) {
-                  coord[0] = Math.round(coord[0] * (1 + _this2.pad_scale) - Geo$1.tile_scale * _this2.pad_scale / 2);
-                  coord[1] = Math.round(coord[1] * (1 + _this2.pad_scale) - Geo$1.tile_scale * _this2.pad_scale / 2);
-                }
-              });
+              Geo$1.transformGeometry(feature.geometry, transform);
 
               // Use first encountered polygon winding order as default for data source
               _this2.updateDefaultWinding(feature.geometry);
@@ -7928,10 +7939,15 @@ function addLayerDebugEntry(target, layer, faeture_count, geom_count, styles, ba
 
 var MAX_VALUE = Math.pow(2, 16) - 1;
 var has_element_index_uint = false;
+var INITIAL_SIZE = 1024;
+
+// Element indices are written directly into a growable typed array (Uint16 until a value overflows,
+// then upgraded to Uint32 if supported), avoiding a plain JS array and a final copy into a typed array
 var VertexElements = /*#__PURE__*/function () {
   function VertexElements() {
     _classCallCheck(this, VertexElements);
-    this.array = [];
+    this.array = new Uint16Array(INITIAL_SIZE);
+    this.length = 0;
     this.has_overflown = false;
   }
   return _createClass(VertexElements, [{
@@ -7943,20 +7959,33 @@ var VertexElements = /*#__PURE__*/function () {
       }
 
       // Trigger overflow if value is greater than Uint16 max
-      if (value > MAX_VALUE) {
+      if (value > MAX_VALUE && !this.has_overflown) {
         this.has_overflown = true;
         if (!has_element_index_uint) {
           return;
         }
+        this.resize(this.array.length, Uint32Array); // upgrade storage to fit larger indices
       }
-      this.array.push(value);
+      if (this.length === this.array.length) {
+        this.resize(this.array.length * 2, this.array.constructor);
+      }
+      this.array[this.length++] = value;
+    }
+  }, {
+    key: "resize",
+    value: function resize(size, ArrayType) {
+      var array = new ArrayType(size);
+      array.set(this.array.subarray(0, this.length));
+      this.array = array;
     }
   }, {
     key: "end",
     value: function end() {
-      if (this.array.length) {
-        var buffer = createBuffer(this.array, this.has_overflown);
-        this.array = [];
+      if (this.length) {
+        // copy to exact size, so that only the used portion is sent to main thread and GPU
+        var buffer = this.array.slice(0, this.length);
+        this.array = new Uint16Array(INITIAL_SIZE);
+        this.length = 0;
         this.has_overflown = false;
         return buffer;
       } else {
@@ -7968,10 +7997,6 @@ var VertexElements = /*#__PURE__*/function () {
 VertexElements.setElementIndexUint = function (flag) {
   has_element_index_uint = flag;
 };
-function createBuffer(array, overflown) {
-  var typedArray = overflown && has_element_index_uint ? Uint32Array : Uint16Array;
-  return new typedArray(array);
-}
 
 // Maps GL types to JS array types
 var array_types = _defineProperty(_defineProperty(_defineProperty(_defineProperty(_defineProperty(_defineProperty(_defineProperty({}, gl$1.FLOAT, Float32Array), gl$1.BYTE, Int8Array), gl$1.UNSIGNED_BYTE, Uint8Array), gl$1.INT, Int32Array), gl$1.UNSIGNED_INT, Uint32Array), gl$1.SHORT, Int16Array), gl$1.UNSIGNED_SHORT, Uint16Array);
@@ -8019,6 +8044,11 @@ var VertexData = /*#__PURE__*/function () {
           _this.views[attrib.type] = new array_type(_this.vertex_buffer.buffer);
         }
       });
+
+      // Dense list of views, indexed by the vertex layout's add vertex function (faster than keyed GL type look-up)
+      this.view_list = this.vertex_layout.view_types.map(function (type) {
+        return _this.views[type];
+      });
     }
 
     // Check allocated buffer size, expand/realloc buffer if needed
@@ -8050,8 +8080,10 @@ var VertexData = /*#__PURE__*/function () {
   }, {
     key: "addVertex",
     value: function addVertex(vertex) {
-      this.checkBufferSize();
-      this.vertexLayoutAddVertex(vertex, this.views, this.offset);
+      if (this.offset + this.stride > this.byte_length) {
+        this.checkBufferSize();
+      }
+      this.vertexLayoutAddVertex(vertex, this.view_list, this.offset);
       this.offset += this.stride;
       this.vertex_count++;
     }
@@ -8087,6 +8119,7 @@ var VertexLayout = /*#__PURE__*/function () {
     this.index = {}; // JS buffer index of each attribute component, e.g. this.index.position
     this.offset = {}; // VBO buffer byte offset of each attribute component, e.g. this.offset.color
     this.stride = 0; // byte stride of a single vertex
+    this.view_types = []; // unique GL types of dynamic attributes, in sorted order
 
     var index = 0,
       count = 0;
@@ -8136,6 +8169,14 @@ var VertexLayout = /*#__PURE__*/function () {
 
         // Store byte offset of each attribute by name
         this.offset[attrib.name] = attrib.offset;
+
+        // Track unique GL types (in sorted order), used to index typed array views when adding vertices
+        if (this.view_types.indexOf(attrib.type) === -1) {
+          this.view_types.push(attrib.type);
+          this.view_types.sort(function (a, b) {
+            return a - b;
+          });
+        }
       }
       // Static attribute
       else {
@@ -8212,7 +8253,7 @@ var VertexLayout = /*#__PURE__*/function () {
         // `t` = current typed array to write to
         // `o` = current offset into VBO, in current type size (e.g. divide 2 for shorts, divide by 4 for floats, etc.)
         // `v` = plain JS array containing vertex data
-        // `vs` = typed arrays (one per GL type needed for this vertex layout)
+        // `vs` = dense list of typed arrays (one per GL type needed for this vertex layout, see `view_types`)
         // `off` = current offset into VBO, in bytes
         var src = ['var t, o;'];
 
@@ -8225,7 +8266,7 @@ var VertexLayout = /*#__PURE__*/function () {
         for (var c = 0; c < components.length; c++) {
           var component = components[c];
           if (last_type !== component.type) {
-            src.push("t = vs[".concat(component.type, "];"));
+            src.push("t = vs[".concat(this.view_types.indexOf(component.type), "];"));
             src.push("o = off".concat(component.shift ? ' >> ' + component.shift : '', ";"));
             last_type = component.type;
           }
@@ -9039,8 +9080,6 @@ function defaultCompare(a, b) {
     return a < b ? -1 : a > b ? 1 : 0;
 }
 
-var up_vec3 = [0, 0, 1];
-
 /**
  * To tesselate flat 2D polygons.
  * The x & y coordinates will be set as first two elements of provided vertex_template.
@@ -9179,21 +9218,36 @@ function buildExtrudedPolygons(polygons, z, height, min_height, vertex_data, ver
           w1 = w;
         }
 
-        // Two triangles for the quad formed by each vertex pair, going from bottom to top height
-        var wall_vertices = [[contour[w1][0], contour[w1][1], max_z], [contour[w1][0], contour[w1][1], min_z], [contour[w0][0], contour[w0][1], min_z], [contour[w0][0], contour[w0][1], max_z]];
-
         // Calc the normal of the wall from up vector and one segment of the wall triangles
-        var wall_vec = Vector$1.normalize([contour[w1][0] - contour[w0][0], contour[w1][1] - contour[w0][1], 0]);
-        var normal = Vector$1.cross(up_vec3, wall_vec);
+        // (inlined normalize + cross product with up vector, to avoid allocations)
+        var x0 = contour[w0][0],
+          y0 = contour[w0][1];
+        var x1 = contour[w1][0],
+          y1 = contour[w1][1];
+        var wall_x = x1 - x0,
+          wall_y = y1 - y0;
+        var wall_len = wall_x * wall_x + wall_y * wall_y;
+        if (wall_len !== 1) {
+          wall_len = Math.sqrt(wall_len);
+          if (wall_len !== 0) {
+            wall_x /= wall_len;
+            wall_y /= wall_len;
+          } else {
+            wall_x = 0;
+            wall_y = 0;
+          }
+        }
 
         // Update vertex template with current surface normal
-        vertex_template[normal_index + 0] = normal[0] * normal_normalize;
-        vertex_template[normal_index + 1] = normal[1] * normal_normalize;
-        vertex_template[normal_index + 2] = normal[2] * normal_normalize;
-        for (var wv = 0; wv < wall_vertices.length; wv++) {
-          vertex_template[0] = wall_vertices[wv][0];
-          vertex_template[1] = wall_vertices[wv][1];
-          vertex_template[2] = wall_vertices[wv][2];
+        vertex_template[normal_index + 0] = (0 - wall_y) * normal_normalize;
+        vertex_template[normal_index + 1] = wall_x * normal_normalize;
+        vertex_template[normal_index + 2] = 0;
+
+        // Two triangles for the quad formed by each vertex pair, going from bottom to top height
+        for (var wv = 0; wv < 4; wv++) {
+          vertex_template[0] = wv < 2 ? x1 : x0;
+          vertex_template[1] = wv < 2 ? y1 : y0;
+          vertex_template[2] = wv === 0 || wv === 3 ? max_z : min_z;
           if (texcoord_index) {
             vertex_template[texcoord_index + 0] = texcoords[wv][0] * texcoord_normalize;
             vertex_template[texcoord_index + 1] = texcoords[wv][1] * texcoord_normalize;
@@ -9888,7 +9942,7 @@ function buildPolyline(line, context) {
 
   // INTERMEDIARY POINTS
   if (has_texcoord) {
-    v += v_scale * Vector$1.length(Vector$1.sub(coordNext, coordCurr));
+    v += v_scale * segmentLength(coordCurr, coordNext);
   }
   for (var i = index_start + 1; i < index_end; i++) {
     var currIndex = i;
@@ -9923,7 +9977,7 @@ function buildPolyline(line, context) {
       addJoin(join_type, v, coordCurr, normPrev, normNext, false, context);
     }
     if (has_texcoord) {
-      v += v_scale * Vector$1.length(Vector$1.sub(coordNext, coordCurr));
+      v += v_scale * segmentLength(coordCurr, coordNext);
     }
   }
 
@@ -10011,10 +10065,36 @@ function endPolygon(coordCurr, normPrev, normNext, join_type, v, context) {
     }
   }
 }
+
+// Length of the segment between two coordinates (includes z if present, matching Vector.length(Vector.sub(b, a)))
+function segmentLength(a, b) {
+  var dx = b[0] - a[0];
+  var dy = b[1] - a[1];
+  if (a.length >= 3 && b.length >= 3) {
+    var dz = b[2] - a[2];
+    return Math.sqrt(dx * dx + dy * dy + dz * dz);
+  }
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+// Inlined equivalent of normalizing (normPrev + normNext) and scaling it, to avoid intermediate allocations
 function createMiterVec(normPrev, normNext) {
-  var miterVec = Vector$1.normalize(Vector$1.add(normPrev, normNext));
-  var scale = 2 / (1 + Math.abs(Vector$1.dot(normPrev, miterVec)));
-  return Vector$1.mult(miterVec, scale * scale);
+  var x = normPrev[0] + normNext[0];
+  var y = normPrev[1] + normNext[1];
+  var d = x * x + y * y;
+  if (d !== 1) {
+    d = Math.sqrt(d);
+    if (d !== 0) {
+      x /= d;
+      y /= d;
+    } else {
+      x = 0;
+      y = 0;
+    }
+  }
+  var scale = 2 / (1 + Math.abs(normPrev[0] * x + normPrev[1] * y));
+  scale *= scale;
+  return [x * scale, y * scale];
 }
 
 // Add a miter vector or a join if the miter is too sharp
@@ -10130,6 +10210,8 @@ function addVertex(position, extrude, normal, u, v, context, flip) {
 //                                             \./
 //                                              C
 var uvCurr = [0, 0];
+var blade = [0, 0]; // reusable instance for fan extrusion vector
+
 function addFan(coord, eA, eC, eB, normal, uvA, uvC, uvB, isCap, isBevel, context) {
   // eA = extrusion vector of first outer vertex
   // eC = extrusion vector of inner vertex
@@ -10163,7 +10245,8 @@ function addFan(coord, eA, eC, eB, normal, uvA, uvC, uvB, isCap, isBevel, contex
     addVertex(coord, eC, normal, uvC[0], uvC[1], context, 1);
     addVertex(coord, eA, normal, uvA[0], uvA[1], context, 1);
   }
-  var blade = eA;
+  var blade_x = eA[0],
+    blade_y = eA[1];
   var has_texcoord = context.texcoord_index != null;
   if (has_texcoord) {
     if (isCap) {
@@ -10174,6 +10257,9 @@ function addFan(coord, eA, eC, eB, normal, uvA, uvC, uvB, isCap, isBevel, contex
     }
   }
   var angle_step = angle / numTriangles;
+  var cos_step = Math.cos(angle_step); // rotation is constant for each step of the fan
+  var sin_step = Math.sin(angle_step);
+  var rot_x, rot_y;
   var flip = angle < 0 ? -1 : 1; // if angle < 0, is cw - set 'flip' flag
 
   // add outside vertices in reverse order depending on sign of angle
@@ -10188,18 +10274,26 @@ function addFan(coord, eA, eC, eB, normal, uvA, uvC, uvB, isCap, isBevel, contex
   for (var i = 0; i < numTriangles; i++) {
     if (i === 0 && angle < 0) {
       // if ccw, flip the extrusion vector so offsets work properly
-      blade = Vector$1.neg(blade);
+      blade_x = -blade_x;
+      blade_y = -blade_y;
     }
-    blade = Vector$1.rot(blade, angle_step);
+    rot_x = blade_x * cos_step - blade_y * sin_step;
+    rot_y = blade_x * sin_step + blade_y * cos_step;
+    blade_x = blade[0] = rot_x;
+    blade_y = blade[1] = rot_y;
     if (has_texcoord) {
       if (isCap) {
         // UV textures go "through" the cap
-        affine_uvCurr = Vector$1.rot(affine_uvCurr, angle_step);
+        rot_x = affine_uvCurr[0] * cos_step - affine_uvCurr[1] * sin_step;
+        rot_y = affine_uvCurr[0] * sin_step + affine_uvCurr[1] * cos_step;
+        affine_uvCurr[0] = rot_x;
+        affine_uvCurr[1] = rot_y;
         uvCurr[0] = affine_uvCurr[0] + uvC[0];
         uvCurr[1] = affine_uvCurr[1] * context.texcoord_width * context.v_scale + uvC[1]; // scale the v-coordinate
       } else {
-        // UV textures go "around" the join
-        uvCurr = Vector$1.add(uvCurr, uv_delta);
+        // UV textures go "around" the join (uvCurr is a fresh copy, safe to update in place)
+        uvCurr[0] = uvCurr[0] + uv_delta[0];
+        uvCurr[1] = uvCurr[1] + uv_delta[1];
       }
     }
     addVertex(coord, blade, normal, uvCurr[0], uvCurr[1], context, flip);
@@ -30298,7 +30392,7 @@ var Scene = /*#__PURE__*/function () {
         return new Promise(function ($return, $error) {
           var texture_nodes, serialize_funcs, updating;
           texture_nodes = _ref.texture_nodes;
-          return Promise.resolve(_this.createWorkers()).then(function ($await_8) {
+          return Promise.resolve(_this.createWorkers()).then(function ($await_7) {
             try {
               // Clean up resources from prior scene
               _this.destroyFeatureSelection();
@@ -30315,15 +30409,15 @@ var Scene = /*#__PURE__*/function () {
                 fade_in: true
               });
               if (options.blocking === true) {
-                return Promise.resolve(updating).then(function ($await_9) {
+                return Promise.resolve(updating).then(function ($await_8) {
                   try {
-                    return $If_7.call(this);
+                    return $If_6.call(this);
                   } catch ($boundEx) {
                     return $error($boundEx);
                   }
                 }.bind(this), $error);
               }
-              function $If_7() {
+              function $If_6() {
                 _this.freePreviousTextures();
                 _this.updating--;
                 _this.initializing = null;
@@ -30336,7 +30430,7 @@ var Scene = /*#__PURE__*/function () {
                 _this.requestRedraw();
                 return $return();
               }
-              return $If_7.call(this);
+              return $If_6.call(this);
             } catch ($boundEx) {
               return $error($boundEx);
             }
@@ -30833,7 +30927,6 @@ var Scene = /*#__PURE__*/function () {
   }, {
     key: "renderStyle",
     value: function renderStyle(style_name, program_key, blend_order) {
-      var _this7 = this;
       var proxy_level = arguments.length > 3 && arguments[3] !== undefined ? arguments[3] : null;
       var style = this.styles[style_name];
       var first_for_style = true; // TODO: allow this state to be passed in (for multilpe blend orders, stencil tests, etc)
@@ -30845,102 +30938,81 @@ var Scene = /*#__PURE__*/function () {
 
       // For each tile, only include meshes for the blend order currently being rendered
       // Builds an array tiles and their associated meshes, each as a [tile, meshes] 2-element array
-      var tile_meshes = renderable_tiles.filter(function (t) {
-        return typeof proxy_level !== 'number' || t.proxy_level === proxy_level;
-      }) // optional filter by proxy level
-      .map(function (t) {
-        if (t.meshes[style_name]) {
-          return [t, t.meshes[style_name].filter(function (m) {
-            return m.variant.blend_order === blend_order;
-          })];
-        }
-      }).filter(function (x) {
-        return x;
-      }); // skip tiles with no meshes for this blend order
+      // (uses plain loops to minimize allocations, since this runs for each style every frame)
+      var tile_meshes = [];
 
       // Mesh variants must be rendered in requested order across tiles, to prevent labels that cross
       // tile boundaries from rendering over adjacent tile features meant to be underneath
-      var max_mesh_order = Math.max.apply(Math, topojson._toConsumableArray(tile_meshes.map(function (_ref4) {
-        var _ref5 = topojson._slicedToArray(_ref4, 2),
-          meshes = _ref5[1];
-        return Math.max.apply(Math, topojson._toConsumableArray(meshes.map(function (m) {
-          return m.variant.mesh_order;
-        })));
-      })));
+      var max_mesh_order = -Infinity;
+      for (var t = 0; t < renderable_tiles.length; t++) {
+        var tile = renderable_tiles[t];
+        if (typeof proxy_level === 'number' && tile.proxy_level !== proxy_level) {
+          continue; // optional filter by proxy level
+        }
+        var style_meshes = tile.meshes[style_name];
+        if (!style_meshes) {
+          continue; // skip tiles with no meshes for this style
+        }
+        var meshes = [];
+        for (var m = 0; m < style_meshes.length; m++) {
+          var mesh = style_meshes[m];
+          if (mesh.variant.blend_order === blend_order) {
+            meshes.push(mesh);
+            if (mesh.variant.mesh_order > max_mesh_order) {
+              max_mesh_order = mesh.variant.mesh_order;
+            }
+          }
+        }
+        tile_meshes.push([tile, meshes]);
+      }
 
       // One pass per mesh variant order (loop goes to max value +1 because 0 is a valid order value)
-      var _loop3 = function _loop3(mo) {
-          // Loop over tiles, with meshes pre-filtered by current blend order
-          var _iterator2 = _createForOfIteratorHelper(tile_meshes),
-            _step2;
-          try {
-            var _loop4 = function _loop4() {
-                var _step2$value = topojson._slicedToArray(_step2.value, 2),
-                  tile = _step2$value[0],
-                  meshes = _step2$value[1];
-                var first_for_tile = true;
-
-                // Skip proxy tiles if new tiles have finished loading this style
-                if (!tile.shouldProxyForStyle(style_name)) {
-                  // log('trace', `Scene.renderStyle(): Skip proxy tile for style '${style_name}' `, tile, tile.proxy_for);
-                  return 0; // continue
-                }
-
-                // Filter meshes further by current variant order
-                var order_meshes = meshes.filter(function (m) {
-                  return m.variant.mesh_order === mo;
-                });
-                if (order_meshes.length === 0) {
-                  return 0; // continue
-                }
-
-                // Style-specific state
-                // Only setup style if rendering for first time this frame
-                // (lazy init, not all styles will be used in all screen views; some styles might be defined but never used)
-                if (first_for_style === true) {
-                  first_for_style = false;
-                  program = _this7.setupStyle(style, program_key);
-                  if (!program) {
-                    // no program found, e.g. happens when rendering selection pass, but style doesn't support selection
-                    return {
-                      v: {
-                        v: 0
-                      }
-                    };
-                  }
-                }
-
-                // Render each mesh (for current variant order)
-                order_meshes.forEach(function (mesh) {
-                  // Tile-specific state
-                  if (first_for_tile === true) {
-                    first_for_tile = false;
-                    _this7.view.setupTile(tile, program);
-                  }
-
-                  // Render this mesh variant
-                  if (style.render(mesh)) {
-                    _this7.requestRedraw();
-                  }
-                  render_count += mesh.geometry_count;
-                });
-              },
-              _ret2;
-            for (_iterator2.s(); !(_step2 = _iterator2.n()).done;) {
-              _ret2 = _loop4();
-              if (_ret2 === 0) continue;
-              if (_ret2) return _ret2.v;
-            }
-          } catch (err) {
-            _iterator2.e(err);
-          } finally {
-            _iterator2.f();
-          }
-        },
-        _ret;
       for (var mo = 0; mo < max_mesh_order + 1; mo++) {
-        _ret = _loop3(mo);
-        if (_ret) return _ret.v;
+        // Loop over tiles, with meshes pre-filtered by current blend order
+        for (var _t = 0; _t < tile_meshes.length; _t++) {
+          var _tile_meshes$_t = topojson._slicedToArray(tile_meshes[_t], 2),
+            _tile = _tile_meshes$_t[0],
+            _meshes = _tile_meshes$_t[1];
+          var first_for_tile = true;
+
+          // Skip proxy tiles if new tiles have finished loading this style
+          if (!_tile.shouldProxyForStyle(style_name)) {
+            // log('trace', `Scene.renderStyle(): Skip proxy tile for style '${style_name}' `, tile, tile.proxy_for);
+            continue;
+          }
+
+          // Render each mesh (for current variant order)
+          for (var _m = 0; _m < _meshes.length; _m++) {
+            var _mesh = _meshes[_m];
+            if (_mesh.variant.mesh_order !== mo) {
+              continue;
+            }
+
+            // Style-specific state
+            // Only setup style if rendering for first time this frame
+            // (lazy init, not all styles will be used in all screen views; some styles might be defined but never used)
+            if (first_for_style === true) {
+              first_for_style = false;
+              program = this.setupStyle(style, program_key);
+              if (!program) {
+                // no program found, e.g. happens when rendering selection pass, but style doesn't support selection
+                return 0;
+              }
+            }
+
+            // Tile-specific state
+            if (first_for_tile === true) {
+              first_for_tile = false;
+              this.view.setupTile(_tile, program);
+            }
+
+            // Render this mesh variant
+            if (style.render(_mesh)) {
+              this.requestRedraw();
+            }
+            render_count += _mesh.geometry_count;
+          }
+        }
       }
       return render_count;
     }
@@ -30986,11 +31058,11 @@ var Scene = /*#__PURE__*/function () {
   }, {
     key: "setRenderState",
     value: function setRenderState() {
-      var _ref6 = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {},
-        depth_test = _ref6.depth_test,
-        depth_write = _ref6.depth_write,
-        cull_face = _ref6.cull_face,
-        blend = _ref6.blend;
+      var _ref4 = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {},
+        depth_test = _ref4.depth_test,
+        depth_write = _ref4.depth_write,
+        cull_face = _ref4.cull_face,
+        blend = _ref4.blend;
       if (!this.initialized) {
         return;
       }
@@ -31063,8 +31135,8 @@ var Scene = /*#__PURE__*/function () {
   }, {
     key: "getFeatureAt",
     value: function getFeatureAt(pixel) {
-      var _ref7 = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : {},
-        radius = _ref7.radius;
+      var _ref5 = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : {},
+        radius = _ref5.radius;
       if (!this.initialized) {
         topojson.log('debug', 'Scene.getFeatureAt() called before scene was initialized');
         return Promise.resolve();
@@ -31112,8 +31184,8 @@ var Scene = /*#__PURE__*/function () {
     value: function queryFeatures() {
       var $args = arguments;
       return new Promise(function ($return, $error) {
-        var _ref8, filter, _ref8$unique, unique, _ref8$group_by, group_by, _ref8$visible, visible, _ref8$geometry, geometry, uniqueify_on_id, uniqueify, group, tile_keys, results, features, keys, groups;
-        _ref8 = $args.length > 0 && $args[0] !== undefined ? $args[0] : {}, filter = _ref8.filter, _ref8$unique = _ref8.unique, unique = _ref8$unique === void 0 ? true : _ref8$unique, _ref8$group_by = _ref8.group_by, group_by = _ref8$group_by === void 0 ? null : _ref8$group_by, _ref8$visible = _ref8.visible, visible = _ref8$visible === void 0 ? null : _ref8$visible, _ref8$geometry = _ref8.geometry, geometry = _ref8$geometry === void 0 ? false : _ref8$geometry;
+        var _ref6, filter, _ref6$unique, unique, _ref6$group_by, group_by, _ref6$visible, visible, _ref6$geometry, geometry, uniqueify_on_id, uniqueify, group, tile_keys, results, features, keys, groups;
+        _ref6 = $args.length > 0 && $args[0] !== undefined ? $args[0] : {}, filter = _ref6.filter, _ref6$unique = _ref6.unique, unique = _ref6$unique === void 0 ? true : _ref6$unique, _ref6$group_by = _ref6.group_by, group_by = _ref6$group_by === void 0 ? null : _ref6$group_by, _ref6$visible = _ref6.visible, visible = _ref6$visible === void 0 ? null : _ref6$visible, _ref6$geometry = _ref6.geometry, geometry = _ref6$geometry === void 0 ? false : _ref6$geometry;
         if (!this.initialized) {
           return $return([]);
         }
@@ -31153,9 +31225,9 @@ var Scene = /*#__PURE__*/function () {
           visible: visible,
           geometry: geometry,
           tile_keys: tile_keys
-        })).then(function ($await_10) {
+        })).then(function ($await_9) {
           try {
-            results = $await_10;
+            results = $await_9;
             features = [];
             keys = {};
             groups = {};
@@ -31191,27 +31263,27 @@ var Scene = /*#__PURE__*/function () {
   }, {
     key: "rebuild",
     value: function rebuild() {
-      var _this8 = this;
-      var _ref9 = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {},
-        _ref9$initial = _ref9.initial,
-        initial = _ref9$initial === void 0 ? false : _ref9$initial,
-        _ref9$new_generation = _ref9.new_generation,
-        new_generation = _ref9$new_generation === void 0 ? true : _ref9$new_generation,
-        _ref9$sources = _ref9.sources,
-        sources = _ref9$sources === void 0 ? null : _ref9$sources,
-        serialize_funcs = _ref9.serialize_funcs,
-        _ref9$profile = _ref9.profile,
-        profile = _ref9$profile === void 0 ? false : _ref9$profile,
-        _ref9$fade_in = _ref9.fade_in,
-        fade_in = _ref9$fade_in === void 0 ? false : _ref9$fade_in;
+      var _this7 = this;
+      var _ref7 = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {},
+        _ref7$initial = _ref7.initial,
+        initial = _ref7$initial === void 0 ? false : _ref7$initial,
+        _ref7$new_generation = _ref7.new_generation,
+        new_generation = _ref7$new_generation === void 0 ? true : _ref7$new_generation,
+        _ref7$sources = _ref7.sources,
+        sources = _ref7$sources === void 0 ? null : _ref7$sources,
+        serialize_funcs = _ref7.serialize_funcs,
+        _ref7$profile = _ref7.profile,
+        profile = _ref7$profile === void 0 ? false : _ref7$profile,
+        _ref7$fade_in = _ref7.fade_in,
+        fade_in = _ref7$fade_in === void 0 ? false : _ref7$fade_in;
       return new Promise(function (resolve, reject) {
         // Skip rebuild if already in progress
-        if (_this8.building) {
+        if (_this7.building) {
           // Queue up to one rebuild call at a time, only save last request
-          if (_this8.building.queued && _this8.building.queued.reject) {
+          if (_this7.building.queued && _this7.building.queued.reject) {
             // notify previous request that it did not complete
             topojson.log('debug', 'Scene.rebuild: request superceded by a newer call');
-            _this8.building.queued.resolve(false); // false flag indicates rebuild request was superceded
+            _this7.building.queued.resolve(false); // false flag indicates rebuild request was superceded
           }
 
           // Save queued request
@@ -31223,7 +31295,7 @@ var Scene = /*#__PURE__*/function () {
             profile: profile,
             fade_in: fade_in
           };
-          _this8.building.queued = {
+          _this7.building.queued = {
             resolve: resolve,
             reject: reject,
             options: options
@@ -31233,7 +31305,7 @@ var Scene = /*#__PURE__*/function () {
         }
 
         // Track tile build state
-        _this8.building = {
+        _this7.building = {
           resolve: resolve,
           reject: reject,
           initial: initial
@@ -31241,40 +31313,40 @@ var Scene = /*#__PURE__*/function () {
 
         // Profiling
         if (profile) {
-          _this8.debug.profile('Scene.rebuild');
+          _this7.debug.profile('Scene.rebuild');
         }
 
         // Increment generation to ensure style/tile building stay in sync
         // (skipped if calling function already incremented)
         if (new_generation) {
-          _this8.generation = ++Scene.generation;
-          for (var style in _this8.styles) {
-            _this8.styles[style].setGeneration(_this8.generation);
+          _this7.generation = ++Scene.generation;
+          for (var style in _this7.styles) {
+            _this7.styles[style].setGeneration(_this7.generation);
           }
         }
 
         // Update config (in case JS objects were manipulated directly)
-        _this8.syncConfigToWorker({
+        _this7.syncConfigToWorker({
           serialize_funcs: serialize_funcs
         });
-        _this8.resetWorkerFeatureSelection(sources);
-        _this8.resetTime();
+        _this7.resetWorkerFeatureSelection(sources);
+        _this7.resetTime();
 
         // Rebuild visible tiles
-        _this8.tile_manager.pruneToVisibleTiles();
-        _this8.tile_manager.forEachTile(function (tile) {
+        _this7.tile_manager.pruneToVisibleTiles();
+        _this7.tile_manager.forEachTile(function (tile) {
           if (!sources || sources.indexOf(tile.source.name) > -1) {
-            _this8.tile_manager.buildTile(tile, {
+            _this7.tile_manager.buildTile(tile, {
               fade_in: fade_in
             });
           }
         });
-        _this8.tile_manager.updateTilesForView(); // picks up additional tiles for any new/changed data sources
-        _this8.tile_manager.checkBuildQueue(); // resolve immediately if no tiles to build
+        _this7.tile_manager.updateTilesForView(); // picks up additional tiles for any new/changed data sources
+        _this7.tile_manager.checkBuildQueue(); // resolve immediately if no tiles to build
       }).then(function () {
         // Profiling
         if (profile) {
-          _this8.debug.profileEnd('Scene.rebuild');
+          _this7.debug.profileEnd('Scene.rebuild');
         }
       });
     }
@@ -31313,9 +31385,9 @@ var Scene = /*#__PURE__*/function () {
     value: function loadScene() {
       var $args = arguments;
       return new Promise(function ($return, $error) {
-        var config_source, _ref10, base_path, file_type, _await$SceneLoader$lo, config, bundle, texture_nodes;
+        var config_source, _ref8, base_path, file_type, _await$SceneLoader$lo, config, bundle, texture_nodes;
         config_source = $args.length > 0 && $args[0] !== undefined ? $args[0] : null;
-        _ref10 = $args.length > 1 && $args[1] !== undefined ? $args[1] : {}, base_path = _ref10.base_path, file_type = _ref10.file_type;
+        _ref8 = $args.length > 1 && $args[1] !== undefined ? $args[1] : {}, base_path = _ref8.base_path, file_type = _ref8.file_type;
         this.config_source = config_source || this.config_source;
         if (typeof this.config_source === 'string') {
           this.base_path = topojson.pathForURL(base_path || this.config_source);
@@ -31329,9 +31401,9 @@ var Scene = /*#__PURE__*/function () {
         return Promise.resolve(SceneLoader.loadScene(this.config_source, {
           path: this.base_path,
           type: file_type
-        })).then(function ($await_11) {
+        })).then(function ($await_10) {
           try {
-            _await$SceneLoader$lo = $await_11, config = _await$SceneLoader$lo.config, bundle = _await$SceneLoader$lo.bundle, texture_nodes = _await$SceneLoader$lo.texture_nodes;
+            _await$SceneLoader$lo = $await_10, config = _await$SceneLoader$lo.config, bundle = _await$SceneLoader$lo.bundle, texture_nodes = _await$SceneLoader$lo.texture_nodes;
             this.config = config;
             this.config_bundle = bundle;
             return $return({
@@ -31393,7 +31465,7 @@ var Scene = /*#__PURE__*/function () {
   }, {
     key: "createDataSources",
     value: function createDataSources() {
-      var _this9 = this;
+      var _this8 = this;
       var rebuild_all = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : false;
       var reset = []; // sources to reset
       var prev_source_names = Object.keys(this.sources);
@@ -31430,8 +31502,8 @@ var Scene = /*#__PURE__*/function () {
 
       // Sources that were removed
       prev_source_names.forEach(function (s) {
-        if (!_this9.config.sources[s]) {
-          delete _this9.sources[s]; // TODO: remove from workers too?
+        if (!_this8.config.sources[s]) {
+          delete _this8.sources[s]; // TODO: remove from workers too?
           reset.push(s);
         }
       });
@@ -31456,9 +31528,9 @@ var Scene = /*#__PURE__*/function () {
   }, {
     key: "loadTextures",
     value: function loadTextures() {
-      var _this10 = this;
+      var _this9 = this;
       return topojson.Texture.createFromObject(this.gl, this.config.textures).then(function () {
-        return topojson.Texture.createDefault(_this10.gl);
+        return topojson.Texture.createDefault(_this9.gl);
       }); // create a 'default' texture for placeholders
     }
 
@@ -31466,13 +31538,13 @@ var Scene = /*#__PURE__*/function () {
   }, {
     key: "freePreviousTextures",
     value: function freePreviousTextures() {
-      var _this11 = this;
+      var _this10 = this;
       if (!this.prev_textures) {
         return;
       }
       this.prev_textures.forEach(function (t) {
         // free textures that aren't in the new scene, but are still in the global texture set
-        if (!_this11.config.textures[t] && topojson.Texture.textures[t]) {
+        if (!_this10.config.textures[t] && topojson.Texture.textures[t]) {
           topojson.Texture.textures[t].destroy();
         }
       });
@@ -31502,10 +31574,10 @@ var Scene = /*#__PURE__*/function () {
   }, {
     key: "animated",
     get: function get() {
-      var _this12 = this;
+      var _this11 = this;
       // Disable animation is scene flag requests it, otherwise enable animation if any animated styles are in view
       return this.config.scene.animated === false ? false : this.style_manager.getActiveStyles().some(function (s) {
-        return _this12.styles[s].animated;
+        return _this11.styles[s].animated;
       });
     }
 
@@ -31589,14 +31661,14 @@ var Scene = /*#__PURE__*/function () {
   }, {
     key: "setIntrospection",
     value: function setIntrospection(val) {
-      var _this13 = this;
+      var _this12 = this;
       if (val !== this.introspection) {
         this.introspection = val != null ? val : false;
         this.updating++;
         return this.updateConfig({
           normalize: false
         }).then(function () {
-          return _this13.updating--;
+          return _this12.updating--;
         });
       }
       return Promise.resolve();
@@ -31607,19 +31679,19 @@ var Scene = /*#__PURE__*/function () {
   }, {
     key: "updateConfig",
     value: function updateConfig() {
-      var _this14 = this;
-      var _ref11 = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {},
-        _ref11$loading = _ref11.loading,
-        loading = _ref11$loading === void 0 ? false : _ref11$loading,
-        _ref11$rebuild = _ref11.rebuild,
-        rebuild = _ref11$rebuild === void 0 ? true : _ref11$rebuild,
-        serialize_funcs = _ref11.serialize_funcs,
-        _ref11$texture_nodes = _ref11.texture_nodes,
-        texture_nodes = _ref11$texture_nodes === void 0 ? {} : _ref11$texture_nodes,
-        _ref11$normalize = _ref11.normalize,
-        normalize = _ref11$normalize === void 0 ? true : _ref11$normalize,
-        _ref11$fade_in = _ref11.fade_in,
-        fade_in = _ref11$fade_in === void 0 ? false : _ref11$fade_in;
+      var _this13 = this;
+      var _ref9 = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {},
+        _ref9$loading = _ref9.loading,
+        loading = _ref9$loading === void 0 ? false : _ref9$loading,
+        _ref9$rebuild = _ref9.rebuild,
+        rebuild = _ref9$rebuild === void 0 ? true : _ref9$rebuild,
+        serialize_funcs = _ref9.serialize_funcs,
+        _ref9$texture_nodes = _ref9.texture_nodes,
+        texture_nodes = _ref9$texture_nodes === void 0 ? {} : _ref9$texture_nodes,
+        _ref9$normalize = _ref9.normalize,
+        normalize = _ref9$normalize === void 0 ? true : _ref9$normalize,
+        _ref9$fade_in = _ref9.fade_in,
+        fade_in = _ref9$fade_in === void 0 ? false : _ref9$fade_in;
       this.generation = ++Scene.generation;
       this.updating++;
 
@@ -31659,8 +31731,8 @@ var Scene = /*#__PURE__*/function () {
       this.view.updateBounds();
       this.requestRedraw();
       return done.then(function () {
-        _this14.last_render_count = 0; // force re-evaluation of selection map
-        _this14.requestRedraw();
+        _this13.last_render_count = 0; // force re-evaluation of selection map
+        _this13.requestRedraw();
       });
     }
 
@@ -31668,9 +31740,9 @@ var Scene = /*#__PURE__*/function () {
   }, {
     key: "syncConfigToWorker",
     value: function syncConfigToWorker() {
-      var _ref12 = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {},
-        _ref12$serialize_func = _ref12.serialize_funcs,
-        serialize_funcs = _ref12$serialize_func === void 0 ? true : _ref12$serialize_func;
+      var _ref10 = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {},
+        _ref10$serialize_func = _ref10.serialize_funcs,
+        serialize_funcs = _ref10$serialize_func === void 0 ? true : _ref10$serialize_func;
       // Tell workers we're about to rebuild (so they can update styles, etc.)
       var config_serialized = serialize_funcs ? topojson.Utils.serializeWithFunctions(this.config) : JSON.stringify(this.config);
       return topojson.WorkerBroker.postMessage(this.workers, 'self.updateConfig', {
@@ -31684,20 +31756,20 @@ var Scene = /*#__PURE__*/function () {
   }, {
     key: "createListeners",
     value: function createListeners() {
-      var _this15 = this;
+      var _this14 = this;
       this.listeners = {};
       this.listeners.view = {
         move: function move() {
-          return _this15.trigger('move');
+          return _this14.trigger('move');
         }
       };
       this.view.subscribe(this.listeners.view);
       this.listeners.texture = {
         update: function update() {
-          return _this15.dirty = true;
+          return _this14.dirty = true;
         },
         warning: function warning(data) {
-          return _this15.trigger('warning', Object.assign({
+          return _this14.trigger('warning', Object.assign({
             type: 'textures'
           }, data));
         }
@@ -31705,7 +31777,7 @@ var Scene = /*#__PURE__*/function () {
       topojson.Texture.subscribe(this.listeners.texture);
       this.listeners.scene_loader = {
         error: function error(data) {
-          return _this15.trigger('error', Object.assign({
+          return _this14.trigger('error', Object.assign({
             type: 'scene'
           }, data));
         }
@@ -31732,9 +31804,9 @@ var Scene = /*#__PURE__*/function () {
   }, {
     key: "resetFeatureSelection",
     value: function resetFeatureSelection() {
-      var _this16 = this;
+      var _this15 = this;
       this.selection = new topojson.FeatureSelection(this.gl, this.workers, function () {
-        return _this16.building;
+        return _this15.building;
       });
       this.last_render_count = 0; // force re-evaluation of selection map
     }
@@ -31751,11 +31823,11 @@ var Scene = /*#__PURE__*/function () {
   }, {
     key: "getFeatureSelectionMapSize",
     value: function getFeatureSelectionMapSize() {
-      var _this17 = this;
+      var _this16 = this;
       // Only allow one fetch process to run at a time
       if (this.fetching_selection_map == null) {
         this.fetching_selection_map = topojson.WorkerBroker.postMessage(this.workers, 'self.getFeatureSelectionMapSize').then(function (sizes) {
-          _this17.fetching_selection_map = null;
+          _this16.fetching_selection_map = null;
           return sizes.reduce(function (a, b) {
             return a + b;
           });
@@ -31796,9 +31868,9 @@ var Scene = /*#__PURE__*/function () {
   }, {
     key: "screenshot",
     value: function screenshot() {
-      var _ref13 = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {},
-        _ref13$background = _ref13.background,
-        background = _ref13$background === void 0 ? 'white' : _ref13$background;
+      var _ref11 = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {},
+        _ref11$background = _ref11.background,
+        background = _ref11$background === void 0 ? 'white' : _ref11$background;
       this.requestRedraw();
       return this.media_capture.screenshot({
         background: background
@@ -32435,7 +32507,7 @@ return index;
 // Script modules can't expose exports
 try {
 	Tangram.debug.ESM = false; // mark build as ES module
-	Tangram.debug.SHA = 'd0b887d09a3645aad91a18bd3bd0362d74627da3';
+	Tangram.debug.SHA = '411c66a52aab73379f0196999e12a3d144e56548';
 	if (false === true && typeof window === 'object') {
 	    window.Tangram = Tangram;
 	}

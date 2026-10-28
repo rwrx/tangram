@@ -1,4 +1,4 @@
-import chai from 'chai';
+import * as chai from 'chai';
 import { LayerLeaf, LayerTree, matchFeature, mergeTrees, parseLayers, groupProps, calculateDraw } from '../src/styles/layer';
 import sampleLayers from './fixtures/sample-layers.json';
 

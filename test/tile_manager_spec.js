@@ -1,4 +1,4 @@
-import chai from 'chai';
+import * as chai from 'chai';
 let assert = chai.assert;
 
 let nycLatLng = { lng: -73.97229909896852, lat: 40.76456761707639, zoom: 17 };

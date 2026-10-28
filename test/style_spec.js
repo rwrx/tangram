@@ -1,4 +1,4 @@
-import chai from 'chai';
+import * as chai from 'chai';
 let assert = chai.assert;
 
 import {StyleManager} from '../src/styles/style_manager';

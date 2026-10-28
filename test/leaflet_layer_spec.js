@@ -1,4 +1,4 @@
-import chai from 'chai';
+import * as chai from 'chai';
 import Scene from '../src/scene/scene';
 import {leafletLayer, LeafletLayer} from '../src/leaflet_layer';
 import sampleScene from './fixtures/sample-scene.json';

@@ -1,4 +1,4 @@
-import chai from 'chai';
+import * as chai from 'chai';
 let assert = chai.assert;
 import VertexLayout from '../src/gl/vertex_layout';
 import VertexData from '../src/gl/vertex_data';

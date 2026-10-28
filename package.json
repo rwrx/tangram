@@ -1,6 +1,6 @@
 {
   "name": "tangram",
-  "version": "0.22.0",
+  "version": "0.23.0",
   "description": "WebGL Maps for Vector Tiles",
   "repository": {
     "type": "git",
@@ -35,10 +35,10 @@
     "watch": "ESM=\"${ESM:=true}\" SERVE=true ./node_modules/.bin/rollup -cw",
     "lint": "./node_modules/.bin/eslint src/",
     "test": "npm run lint && npm run test-run",
-    "test-run": "npm run test-build-worker && ESM=false ./node_modules/karma/bin/karma start karma.conf.js --browsers Chrome --single-run",
+    "test-run": "npm run test-build-worker && ESM=false ./node_modules/karma/bin/karma start karma.conf.cjs --browsers Chrome --single-run",
     "test-build-worker": "ESM=false rollup -c test/rollup.config.worker.js",
-    "karma-start": "./node_modules/karma/bin/karma start karma.conf.js --browsers Chrome --no-watch",
-    "karma-run": "./node_modules/karma/bin/karma run karma.conf.js --browsers Chrome"
+    "karma-start": "./node_modules/karma/bin/karma start karma.conf.cjs --browsers Chrome --no-watch",
+    "karma-run": "./node_modules/karma/bin/karma run karma.conf.cjs --browsers Chrome"
   },
   "files": [
     "src/*",

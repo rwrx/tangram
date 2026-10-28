@@ -1,12 +1,14 @@
-import babel from '@rollup/plugin-babel';
-import resolve from '@rollup/plugin-node-resolve';
-import commonjs from '@rollup/plugin-commonjs';
-import globals from 'rollup-plugin-node-globals';
-import builtins from 'rollup-plugin-node-builtins';
-import json from '@rollup/plugin-json';
-import { importAsString } from 'rollup-plugin-string-import';
+// CommonJS config (package.json has "type": "module", but Karma loads its config with require())
+const babel = require('@rollup/plugin-babel').default;
+const resolve = require('@rollup/plugin-node-resolve').default;
+const commonjs = require('@rollup/plugin-commonjs').default;
+const globals = require('rollup-plugin-node-globals');
+const builtins = require('rollup-plugin-node-builtins');
+const json = require('@rollup/plugin-json').default;
 
-export default {
+module.exports = async function (config) {
+    // ESM-only plugin, must be loaded with dynamic import
+    const { importAsString } = await import('rollup-plugin-string-import');
 
     config.set({
         basePath: '',
@@ -62,7 +64,9 @@ export default {
 
                 // These are needed for jszip node-environment compatibility,
                 // previously provided by browserify
-                globals(),
+                globals({
+                    exclude: ['node_modules/chai/**'] // plugin's parser doesn't support chai's modern syntax (class static blocks)
+                }),
                 builtins()
             ]
         },
@@ -86,5 +90,4 @@ export default {
         singleRun: false
 
     });
-
-}
+};
