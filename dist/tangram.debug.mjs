@@ -85,7 +85,7 @@ function _defineProperty(e, r, t) {
   }) : e[r] = t, e;
 }
 
-var version$1 = "0.23.0";
+var version$1 = "0.23.1";
 
 var version = 'v' + version$1;
 
@@ -30411,7 +30411,7 @@ return index;
 // Script modules can't expose exports
 try {
 	Tangram.debug.ESM = true; // mark build as ES module
-	Tangram.debug.SHA = '7dd40a87bbc9ebf6f3faf4cea9ec56b602c3137e';
+	Tangram.debug.SHA = 'c766b79c4ca9cd322664a8c0621a309052083730';
 	if (true === true && typeof window === 'object') {
 	    window.Tangram = Tangram;
 	}
