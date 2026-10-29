@@ -105,6 +105,9 @@ export class MVTSource extends NetworkTileSource {
                     if (coordinates.length === 1) {
                         geometry.type = 'Point';
                         geometry.coordinates = geometry.coordinates[0][0];
+                        // Keep the original tile geometry and extent, so FeatureSelection.makeColor can
+                        // compute the point's lat/lng (it doesn't get the full tile data in its arguments)
+                        geometry.latLng = { _geometry: feature.loadGeometry()[0][0], _extent: layer.extent };
                     }
                     else {
                         geometry.type = 'MultiPoint';

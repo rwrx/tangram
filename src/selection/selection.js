@@ -293,10 +293,37 @@ export default class FeatureSelection {
         return this.map[key];
     }
 
+    // Projects a point's tile geometry into [lat, lng]
+    static getPointFeatureLatLng(tileCoords, extent, point) {
+        try {
+            var size = extent * Math.pow(2, tileCoords.z),
+                x0 = extent * tileCoords.x,
+                y0 = extent * tileCoords.y,
+                y2 = 180 - (point.y + y0) * 360 / size;
+
+            return [
+                360 / Math.PI * Math.atan(Math.exp(y2 * Math.PI / 180)) - 90,
+                (point.x + x0) * 360 / size - 180
+            ];
+        }
+        catch (error) {
+            console.error(error);
+            return undefined;
+        }
+    }
+
     static makeColor(feature, tile, context) {
         var selector = this.makeEntry(tile);
         selector.feature = {
             id: feature.id,
+            // Coordinates of a point of interest, only defined for features of type "Point"
+            latLng: feature.geometry && feature.geometry.latLng !== undefined
+                ? this.getPointFeatureLatLng(
+                    tile.coords,
+                    feature.geometry.latLng._extent,
+                    feature.geometry.latLng._geometry
+                )
+                : undefined,
             properties: feature.properties,
             source_name: context.source,
             source_layer: context.layer,

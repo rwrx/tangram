@@ -4518,12 +4518,30 @@ var FeatureSelection = /*#__PURE__*/function () {
       this.tiles[tile.key].entries.push(key);
       return this.map[key];
     }
+
+    // Projects a point's tile geometry into [lat, lng]
+  }, {
+    key: "getPointFeatureLatLng",
+    value: function getPointFeatureLatLng(tileCoords, extent, point) {
+      try {
+        var size = extent * Math.pow(2, tileCoords.z),
+          x0 = extent * tileCoords.x,
+          y0 = extent * tileCoords.y,
+          y2 = 180 - (point.y + y0) * 360 / size;
+        return [360 / Math.PI * Math.atan(Math.exp(y2 * Math.PI / 180)) - 90, (point.x + x0) * 360 / size - 180];
+      } catch (error) {
+        console.error(error);
+        return undefined;
+      }
+    }
   }, {
     key: "makeColor",
     value: function makeColor(feature, tile, context) {
       var selector = this.makeEntry(tile);
       selector.feature = {
         id: feature.id,
+        // Coordinates of a point of interest, only defined for features of type "Point"
+        latLng: feature.geometry && feature.geometry.latLng !== undefined ? this.getPointFeatureLatLng(tile.coords, feature.geometry.latLng._extent, feature.geometry.latLng._geometry) : undefined,
         properties: feature.properties,
         source_name: context.source,
         source_layer: context.layer,
@@ -20937,6 +20955,12 @@ var MVTSource = /*#__PURE__*/function (_NetworkTileSource) {
             if (coordinates.length === 1) {
               geometry.type = 'Point';
               geometry.coordinates = geometry.coordinates[0][0];
+              // Keep the original tile geometry and extent, so FeatureSelection.makeColor can
+              // compute the point's lat/lng (it doesn't get the full tile data in its arguments)
+              geometry.latLng = {
+                _geometry: feature.loadGeometry()[0][0],
+                _extent: layer.extent
+              };
             } else {
               geometry.type = 'MultiPoint';
               geometry.coordinates = geometry.coordinates[0];
@@ -32507,7 +32531,7 @@ return index;
 // Script modules can't expose exports
 try {
 	Tangram.debug.ESM = false; // mark build as ES module
-	Tangram.debug.SHA = '411c66a52aab73379f0196999e12a3d144e56548';
+	Tangram.debug.SHA = '7dd40a87bbc9ebf6f3faf4cea9ec56b602c3137e';
 	if (false === true && typeof window === 'object') {
 	    window.Tangram = Tangram;
 	}
