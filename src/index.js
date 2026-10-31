@@ -27,12 +27,12 @@ import FeatureSelection from './selection/selection';
 import TextCanvas from './styles/text/text_canvas';
 import debugSettings from './utils/debug_settings';
 
-import yaml from 'js-yaml';
+import { load } from 'js-yaml';
 
 // Make some modules accessible for debugging
 const debug = {
     log,
-    yaml,
+    yaml: { load },
     Utils,
     Geo,
     Vector,

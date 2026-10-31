@@ -3,7 +3,7 @@ import * as URLs from '../utils/urls';
 import { isGlobalReference } from './globals';
 
 import JSZip from 'jszip';
-import yaml from 'js-yaml';
+import { load as loadYAML } from 'js-yaml';
 
 export class SceneBundle {
 
@@ -202,7 +202,7 @@ function parseResource (body) {
     // Keeping this for backwards compatibility, but should consider migrating to requiring
     // unique keys, as this is YAML spec. But Tangram ES currently accepts dupe keys as well,
     // so should consider how best to unify.
-    return yaml.safeLoad(body, { json: true });
+    return loadYAML(body, { json: true });
 }
 
 function loadResource (source) {
