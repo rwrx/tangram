@@ -120,15 +120,15 @@ function _typeof(o) {
   }, _typeof(o);
 }
 
-function toPrimitive(t, r) {
+function toPrimitive(t, e) {
   if ("object" != _typeof(t) || !t) return t;
-  var e = t[Symbol.toPrimitive];
-  if (void 0 !== e) {
-    var i = e.call(t, r || "default");
+  var r;
+  if ("undefined" != typeof Symbol && void 0 !== (r = t[Symbol.toPrimitive])) {
+    var i = r.call(t, e || "default");
     if ("object" != _typeof(i)) return i;
     throw new TypeError("@@toPrimitive must return a primitive value.");
   }
-  return ("string" === r ? String : Number)(t);
+  return ("string" === e ? String : Number)(t);
 }
 
 function toPropertyKey(t) {
@@ -177,7 +177,7 @@ function _createClass(e, r, t) {
   }), e;
 }
 
-var version$1 = "0.23.2";
+var version$1 = "0.23.3";
 
 var version = 'v' + version$1;
 
@@ -13438,9 +13438,9 @@ var TextCanvas = /*#__PURE__*/function () {
       size = typeof size === 'string' ? size : String(size); // need a string for regex
 
       var _ref9 = size.match(TextCanvas.font_size_re) || [],
-        _ref10 = _slicedToArray(_ref9, 3),
-        px_size = _ref10[1],
-        units = _ref10[2];
+        _ref0 = _slicedToArray(_ref9, 3),
+        px_size = _ref0[1],
+        units = _ref0[2];
       units = units || 'px';
       if (units === 'em') {
         px_size *= 16;
@@ -31410,13 +31410,13 @@ var Scene = /*#__PURE__*/function () {
   }, {
     key: "freePreviousTextures",
     value: function freePreviousTextures() {
-      var _this10 = this;
+      var _this0 = this;
       if (!this.prev_textures) {
         return;
       }
       this.prev_textures.forEach(function (t) {
         // free textures that aren't in the new scene, but are still in the global texture set
-        if (!_this10.config.textures[t] && topojson.Texture.textures[t]) {
+        if (!_this0.config.textures[t] && topojson.Texture.textures[t]) {
           topojson.Texture.textures[t].destroy();
         }
       });
@@ -31446,10 +31446,10 @@ var Scene = /*#__PURE__*/function () {
   }, {
     key: "animated",
     get: function get() {
-      var _this11 = this;
+      var _this1 = this;
       // Disable animation is scene flag requests it, otherwise enable animation if any animated styles are in view
       return this.config.scene.animated === false ? false : this.style_manager.getActiveStyles().some(function (s) {
-        return _this11.styles[s].animated;
+        return _this1.styles[s].animated;
       });
     }
 
@@ -31533,14 +31533,14 @@ var Scene = /*#__PURE__*/function () {
   }, {
     key: "setIntrospection",
     value: function setIntrospection(val) {
-      var _this12 = this;
+      var _this10 = this;
       if (val !== this.introspection) {
         this.introspection = val != null ? val : false;
         this.updating++;
         return this.updateConfig({
           normalize: false
         }).then(function () {
-          return _this12.updating--;
+          return _this10.updating--;
         });
       }
       return Promise.resolve();
@@ -31551,7 +31551,7 @@ var Scene = /*#__PURE__*/function () {
   }, {
     key: "updateConfig",
     value: function updateConfig() {
-      var _this13 = this;
+      var _this11 = this;
       var _ref9 = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {},
         _ref9$loading = _ref9.loading,
         loading = _ref9$loading === void 0 ? false : _ref9$loading,
@@ -31603,8 +31603,8 @@ var Scene = /*#__PURE__*/function () {
       this.view.updateBounds();
       this.requestRedraw();
       return done.then(function () {
-        _this13.last_render_count = 0; // force re-evaluation of selection map
-        _this13.requestRedraw();
+        _this11.last_render_count = 0; // force re-evaluation of selection map
+        _this11.requestRedraw();
       });
     }
 
@@ -31612,9 +31612,9 @@ var Scene = /*#__PURE__*/function () {
   }, {
     key: "syncConfigToWorker",
     value: function syncConfigToWorker() {
-      var _ref10 = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {},
-        _ref10$serialize_func = _ref10.serialize_funcs,
-        serialize_funcs = _ref10$serialize_func === void 0 ? true : _ref10$serialize_func;
+      var _ref0 = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {},
+        _ref0$serialize_funcs = _ref0.serialize_funcs,
+        serialize_funcs = _ref0$serialize_funcs === void 0 ? true : _ref0$serialize_funcs;
       // Tell workers we're about to rebuild (so they can update styles, etc.)
       var config_serialized = serialize_funcs ? topojson.Utils.serializeWithFunctions(this.config) : JSON.stringify(this.config);
       return topojson.WorkerBroker.postMessage(this.workers, 'self.updateConfig', {
@@ -31628,20 +31628,20 @@ var Scene = /*#__PURE__*/function () {
   }, {
     key: "createListeners",
     value: function createListeners() {
-      var _this14 = this;
+      var _this12 = this;
       this.listeners = {};
       this.listeners.view = {
         move: function move() {
-          return _this14.trigger('move');
+          return _this12.trigger('move');
         }
       };
       this.view.subscribe(this.listeners.view);
       this.listeners.texture = {
         update: function update() {
-          return _this14.dirty = true;
+          return _this12.dirty = true;
         },
         warning: function warning(data) {
-          return _this14.trigger('warning', Object.assign({
+          return _this12.trigger('warning', Object.assign({
             type: 'textures'
           }, data));
         }
@@ -31649,7 +31649,7 @@ var Scene = /*#__PURE__*/function () {
       topojson.Texture.subscribe(this.listeners.texture);
       this.listeners.scene_loader = {
         error: function error(data) {
-          return _this14.trigger('error', Object.assign({
+          return _this12.trigger('error', Object.assign({
             type: 'scene'
           }, data));
         }
@@ -31676,9 +31676,9 @@ var Scene = /*#__PURE__*/function () {
   }, {
     key: "resetFeatureSelection",
     value: function resetFeatureSelection() {
-      var _this15 = this;
+      var _this13 = this;
       this.selection = new topojson.FeatureSelection(this.gl, this.workers, function () {
-        return _this15.building;
+        return _this13.building;
       });
       this.last_render_count = 0; // force re-evaluation of selection map
     }
@@ -31695,11 +31695,11 @@ var Scene = /*#__PURE__*/function () {
   }, {
     key: "getFeatureSelectionMapSize",
     value: function getFeatureSelectionMapSize() {
-      var _this16 = this;
+      var _this14 = this;
       // Only allow one fetch process to run at a time
       if (this.fetching_selection_map == null) {
         this.fetching_selection_map = topojson.WorkerBroker.postMessage(this.workers, 'self.getFeatureSelectionMapSize').then(function (sizes) {
-          _this16.fetching_selection_map = null;
+          _this14.fetching_selection_map = null;
           return sizes.reduce(function (a, b) {
             return a + b;
           });
@@ -31740,9 +31740,9 @@ var Scene = /*#__PURE__*/function () {
   }, {
     key: "screenshot",
     value: function screenshot() {
-      var _ref11 = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {},
-        _ref11$background = _ref11.background,
-        background = _ref11$background === void 0 ? 'white' : _ref11$background;
+      var _ref1 = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {},
+        _ref1$background = _ref1.background,
+        background = _ref1$background === void 0 ? 'white' : _ref1$background;
       this.requestRedraw();
       return this.media_capture.screenshot({
         background: background
@@ -32381,7 +32381,7 @@ return index;
 // Script modules can't expose exports
 try {
 	Tangram.debug.ESM = false; // mark build as ES module
-	Tangram.debug.SHA = '87e346a3b92c1d54fce3d6de8cca040726b04e12';
+	Tangram.debug.SHA = '4944155f7dda6f2336dc0dc0a1e94763386ca84d';
 	if (false === true && typeof window === 'object') {
 	    window.Tangram = Tangram;
 	}
