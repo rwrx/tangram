@@ -1120,7 +1120,9 @@ export default class Scene {
     // Load all textures in the scene definition
     loadTextures() {
         return Texture.createFromObject(this.gl, this.config.textures)
-            .then(() => Texture.createDefault(this.gl)); // create a 'default' texture for placeholders
+            // create a 'default' texture for placeholders, unless the scene was destroyed in the meantime
+            // (a non-blocking load resolves before this runs, so the scene can be destroyed before it does)
+            .then(() => this.gl && Texture.createDefault(this.gl));
     }
 
     // Free textures from previously loaded scene

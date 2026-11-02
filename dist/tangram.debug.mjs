@@ -29381,7 +29381,10 @@ class Scene {
 
   // Load all textures in the scene definition
   loadTextures() {
-    return topojson.Texture.createFromObject(this.gl, this.config.textures).then(() => topojson.Texture.createDefault(this.gl)); // create a 'default' texture for placeholders
+    return topojson.Texture.createFromObject(this.gl, this.config.textures)
+    // create a 'default' texture for placeholders, unless the scene was destroyed in the meantime
+    // (a non-blocking load resolves before this runs, so the scene can be destroyed before it does)
+    .then(() => this.gl && topojson.Texture.createDefault(this.gl));
   }
 
   // Free textures from previously loaded scene
@@ -30258,7 +30261,7 @@ return index;
 // Script modules can't expose exports
 try {
 	Tangram.debug.ESM = true; // mark build as ES module
-	Tangram.debug.SHA = '7d2bdac1036b1f043056130fa85b1430d7f9841f';
+	Tangram.debug.SHA = '87e346a3b92c1d54fce3d6de8cca040726b04e12';
 	if (true === true && typeof window === 'object') {
 	    window.Tangram = Tangram;
 	}
