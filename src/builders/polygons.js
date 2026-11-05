@@ -2,7 +2,7 @@
 import Geo from '../utils/geo';
 import { default_uvs, outsideTile } from './common';
 
-import earcut from 'earcut';
+import earcut, { flatten } from 'earcut';
 import quickselect from 'quickselect';
 
 
@@ -41,7 +41,7 @@ export function buildPolygons (
             polygon = polygon.slice(0, max_rings);
         }
 
-        const indices = triangulatePolygon(earcut.flatten(polygon));
+        const indices = triangulatePolygon(flatten(polygon));
         const num_indices = indices.length;
         const element_offset = vertex_data.vertex_count;
 

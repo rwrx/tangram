@@ -46,7 +46,7 @@ export default class TextCanvas {
     }
 
     async textSizes (tile_id, texts) {
-        await FontManager.loadFonts();
+        await FontManager.loadFontsFor(TextCanvas.fontsOf(texts));
         return Task.add({
             type: 'textSizes',
             run: this.processTextSizesTask.bind(this),
@@ -718,6 +718,24 @@ export default class TextCanvas {
     }
 
 }
+
+// The fonts of texts to measure (see textSizes), as CSS font values for loading them: the size doesn't affect
+// which font face is used, so all sizes of a font give the same value
+TextCanvas.fontsOf = function (texts) {
+    const fonts = new Set();
+    for (const style in texts) {
+        for (const text in texts[style]) {
+            const { text_settings } = texts[style][text];
+            if (text_settings.family != null) {
+                fonts.add([text_settings.style, text_settings.weight, '16px', text_settings.family].filter(x => x).join(' '));
+            }
+            else {
+                fonts.add(text_settings.font_css);
+            }
+        }
+    }
+    return [...fonts];
+};
 
 // Extract font size and units
 TextCanvas.font_size_re = /((?:[0-9]*\.)?[0-9]+)\s*(px|pt|em|%)?/;

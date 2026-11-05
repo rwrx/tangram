@@ -90,6 +90,8 @@ export class MVTSource extends NetworkTileSource {
 
                 var geometry = feature_geojson.geometry;
                 var coordinates = feature.loadGeometry();
+                // The first point in tile coordinates, before they're scaled below (replaced, not modified)
+                var first_point = coordinates.length > 0 ? coordinates[0][0] : undefined;
                 for (var r=0; r < coordinates.length; r++) {
                     var ring = coordinates[r];
                     for (var c=0; c < ring.length; c++) {
@@ -107,7 +109,7 @@ export class MVTSource extends NetworkTileSource {
                         geometry.coordinates = geometry.coordinates[0][0];
                         // Keep the original tile geometry and extent, so FeatureSelection.makeColor can
                         // compute the point's lat/lng (it doesn't get the full tile data in its arguments)
-                        geometry.latLng = { _geometry: feature.loadGeometry()[0][0], _extent: layer.extent };
+                        geometry.latLng = { _geometry: first_point, _extent: layer.extent };
                     }
                     else {
                         geometry.type = 'MultiPoint';

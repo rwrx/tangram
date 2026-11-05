@@ -4,8 +4,6 @@ import { execSync } from 'child_process';
 import babel from '@rollup/plugin-babel';
 import resolve from '@rollup/plugin-node-resolve';
 import commonjs from '@rollup/plugin-commonjs';
-import globals from 'rollup-plugin-node-globals';
-import builtins from 'rollup-plugin-node-builtins';
 import replace from '@rollup/plugin-replace';
 import sourcemaps from 'rollup-plugin-sourcemaps2';
 import terser from '@rollup/plugin-terser';
@@ -51,11 +49,6 @@ const config = [{
             exclude: 'node_modules/**',
             babelHelpers: "runtime"
         }),
-
-        // These are needed for jszip node-environment compatibility,
-        // previously provided by browserify
-        globals(),
-        builtins(),
 
         MINIFY ? terser() : false
     ]

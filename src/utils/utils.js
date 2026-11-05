@@ -114,10 +114,58 @@ Utils.cancelRequest = function (key) {
     }
 };
 
+// Resolves in a new task, to split long work in two: the browser can handle input and render in between.
+// (not with setTimeout, which background tabs throttle to once a second)
+Utils.nextTask = function () {
+    if (typeof self !== 'undefined' && self.scheduler && typeof self.scheduler.yield === 'function') {
+        return self.scheduler.yield();
+    }
+    return new Promise(resolve => {
+        const channel = new MessageChannel();
+        channel.port1.onmessage = () => {
+            channel.port1.close();
+            resolve();
+        };
+        channel.port2.postMessage(null);
+    });
+};
+
+// Does an object contain a function (at any depth)?
+function containsFunction (obj) {
+    if (typeof obj === 'function') {
+        return true;
+    }
+    if (obj === null || typeof obj !== 'object') {
+        return false;
+    }
+    if (Array.isArray(obj)) {
+        for (let i = 0; i < obj.length; i++) {
+            const v = obj[i];
+            if (v !== null && (typeof v === 'object' || typeof v === 'function') && containsFunction(v)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    for (const k in obj) {
+        const v = obj[k];
+        if (v !== null && (typeof v === 'object' || typeof v === 'function') && containsFunction(v)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Stringify an object into JSON, but convert functions to strings
 Utils.serializeWithFunctions = function (obj) {
     if (typeof obj === 'function') {
         return obj.toString();
+    }
+
+    // Without functions the result is the same, and JSON.stringify is much faster without a replacer
+    // (a scene config is large: this runs on each config update)
+    if (!containsFunction(obj)) {
+        return JSON.stringify(obj);
     }
 
     let serialized = JSON.stringify(obj, function(k, v) {

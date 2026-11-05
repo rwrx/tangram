@@ -5,13 +5,21 @@ import FontFaceObserver from 'fontfaceobserver';
 const FontManager = {
 
     // Font detection
-    fonts_loaded: Promise.resolve(), // resolves when all requested fonts have been detected
+    fonts_loaded: Promise.resolve(), // resolves when all requested fonts have been detected (or added, see below)
     last_loaded: null,               // tracks last set of fonts loaded
+    loading_css: new Map(),          // loads of the fonts of CSS font values, see loadFontsFor()
+
+    // How long text waits for a font to load before it uses a fallback font (like FontFaceObserver's default)
+    load_timeout: 3000,
 
     // Load set of custom font faces
     // `fonts` is an object where the key is a font family name, and the value is one or more font face
     // definitions. The value can be either a single object, or an array of such objects.
     // If the special string value 'external' is used, it indicates the the font will be loaded via external CSS.
+    //
+    // With the native font loading API, faces with a URL are only added to the document here, and each is
+    // downloaded when text first needs it (see loadFontsFor): faces the map doesn't show aren't downloaded, and
+    // the downloads don't compete with the page's own requests while the scene is loading.
     loadFonts (fonts) {
         const same = (JSON.stringify(fonts) === this.last_loaded);
         if (fonts && !same) {
@@ -27,8 +35,51 @@ const FontManager = {
 
             this.last_loaded = JSON.stringify(fonts);
             this.fonts_loaded = Promise.all(queue.filter(x => x));
+            this.loading_css = new Map(); // fonts may now be available for other faces
         }
         return this.fonts_loaded;
+    },
+
+    // Waits until the font faces that text drawn with these CSS font values (e.g. `italic 600 12px Poppins`)
+    // would use are loaded - and loads them if they aren't, see loadFonts()
+    async loadFontsFor (fonts_css) {
+        await this.fonts_loaded;
+        if (!this.supportsNativeFontLoading()) {
+            return; // loadFonts() has loaded all faces
+        }
+        await Promise.all(fonts_css.map(font_css => this.loadFontCSS(font_css)));
+    },
+
+    // Loads the font faces that match a CSS font value, or times out
+    loadFontCSS (font_css) {
+        let loading = this.loading_css.get(font_css);
+        if (!loading) {
+            let timer;
+            const timeout = new Promise((resolve, reject) => {
+                timer = setTimeout(() => reject(new Error(`${this.load_timeout}ms timeout exceeded`)), this.load_timeout);
+            });
+            loading = Promise.race([document.fonts.load(font_css), timeout])
+                .then(
+                    () => {
+                        clearTimeout(timer);
+                        log('debug', `Fonts for '${font_css}' are available`);
+                    },
+                    e => {
+                        clearTimeout(timer);
+                        log('warn', `Fonts for '${font_css}' are NOT available`, e); // text uses a fallback font
+                    }
+                );
+            this.loading_css.set(font_css, loading);
+        }
+        return loading;
+    },
+
+    supportsNativeFontLoading () {
+        if (this.supports_native_font_loading === undefined) {
+            this.supports_native_font_loading = (typeof window !== 'undefined' && window.FontFace !== undefined &&
+                typeof document !== 'undefined' && document.fonts !== undefined);
+        }
+        return this.supports_native_font_loading;
     },
 
     // Load a single font face
@@ -37,6 +88,8 @@ const FontManager = {
     // If the object's value is the special string 'external', or if no `url` is defined, then the font face
     // is assumed is assumed to been loaded via external CSS. In either case, the function returns a promise
     // that resolves when the font face has loaded, or times out.
+    // (With the native font loading API, a face with a URL is only added: loadFontsFor() loads it when needed.
+    // Faces from external CSS are still waited for here: their CSS may not have been added to the document yet.)
     async loadFontFace (family, face) {
         if (face == null || (typeof face !== 'object' && face !== 'external')) {
             return;
@@ -50,6 +103,9 @@ const FontManager = {
             // If URL is defined, inject font into document
             if (typeof face.url === 'string') {
                 await this.injectFontFace(options);
+                if (this.supportsNativeFontLoading()) {
+                    return; // loaded when text needs it
+                }
             }
         }
 
@@ -75,9 +131,7 @@ const FontManager = {
     // Loads a font face via either the native FontFace API, or CSS injection
     // TODO: consider support for multiple format URLs per face, unicode ranges
     async injectFontFace ({ family, url, weight, style }) {
-        if (this.supports_native_font_loading === undefined) {
-            this.supports_native_font_loading = (window.FontFace !== undefined);
-        }
+        this.supportsNativeFontLoading();
 
         // Convert blob URLs, depending on whether the native FontFace API will be used or not.
         //

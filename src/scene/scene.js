@@ -14,6 +14,7 @@ import {StyleManager} from '../styles/style_manager';
 import {Style} from '../styles/style';
 import StyleParser from '../styles/style_parser';
 import SceneLoader from './scene_loader';
+import { parseSceneText } from './yaml';
 import View from './view';
 import Light from '../lights/light';
 import TileManager from '../tile/tile_manager';
@@ -41,6 +42,9 @@ export default class Scene {
         this.view = new View(this, options);
         this.tile_manager = new TileManager({ scene: this });
         this.num_workers = options.numWorkers || 2;
+        this.workers_ready = null;          // a promise that resolves when the workers are initialized
+        this.scene_text_requests = new Set(); // scene files being parsed in workers (see parseSceneText)
+        this.next_parse_worker = 0;
         if (options.disableVertexArrayObjects === true) {
             VertexArrayObject.disabled = true;
         }
@@ -57,6 +61,7 @@ export default class Scene {
         this.style_manager = new StyleManager();
 
         this.building = null;                           // tracks current scene building state (tiles being built, etc.)
+        this.load_event_update = null;                  // a config update requested during the `load` event
         this.dirty = true;                              // request a redraw
 
         if (options.preUpdate){
@@ -138,6 +143,7 @@ export default class Scene {
 
         // Load scene definition (sources, styles, etc.), then create styles & workers
         this.createCanvas();
+        this.startWorkers(); // they parse the scene files while they're loading
         this.prev_textures = this.config && Object.keys(this.config.textures); // save textures from last scene
         this.initializing = this.loadScene(config_source, options)
             .then(async ({ texture_nodes }) => {
@@ -314,9 +320,51 @@ export default class Scene {
         }
 
         if (!this.workers) {
-            return this.makeWorkers();
+            this.workers_ready = this.makeWorkers();
         }
-        return Promise.resolve();
+        return this.workers_ready;
+    }
+
+    // Creates the workers before the scene config is known (if there are none yet), to parse the scene files.
+    // They're created with the external scripts of the previous config (none at first), createWorkers()
+    // replaces them once the config is loaded if its scripts are different.
+    startWorkers() {
+        if (this.workers) {
+            return;
+        }
+        this.external_scripts = this.external_scripts || [];
+        this.workers_ready = this.makeWorkers();
+        this.workers_ready.catch(() => {}); // an error is reported by the load, which waits for the workers
+    }
+
+    // Parses the text of a scene file in a worker, so the main thread only has to deserialize the result.
+    // Parses it on the main thread instead if the worker fails, so a syntax error is reported like before
+    // (as a YAMLException with its position), and if the workers are destroyed before the worker replies.
+    parseSceneText(text) {
+        const workers = this.workers;
+        if (!workers || workers.length === 0) {
+            return parseSceneText(text);
+        }
+        const worker = workers[this.next_parse_worker++ % workers.length];
+
+        return new Promise((resolve, reject) => {
+            const requests = this.scene_text_requests;
+            const parseOnMainThread = () => {
+                requests.delete(parseOnMainThread);
+                try {
+                    resolve(parseSceneText(text));
+                }
+                catch (error) {
+                    reject(error);
+                }
+            };
+            requests.add(parseOnMainThread);
+
+            WorkerBroker.postMessage(worker, 'self.parseSceneText', text).then(config => {
+                requests.delete(parseOnMainThread);
+                resolve(config);
+            }, parseOnMainThread);
+        });
     }
 
     // Instantiate workers from URL, init event handlers
@@ -360,6 +408,10 @@ export default class Scene {
                 worker.terminate();
             });
             this.workers = null;
+            this.workers_ready = null;
+
+            // terminated workers won't reply
+            [...this.scene_text_requests].forEach(parseOnMainThread => parseOnMainThread());
         }
     }
 
@@ -1018,7 +1070,10 @@ export default class Scene {
 
         const { config, bundle, texture_nodes } = await SceneLoader.loadScene(
             this.config_source,
-            { path: this.base_path, type: file_type });
+            { path: this.base_path, type: file_type, parse: text => this.parseSceneText(text) });
+
+        // Merging the scene files and applying the config (updateConfig) are each long tasks, they're not run as one
+        await Utils.nextTask();
 
         this.config = config;
         this.config_bundle = bundle;
@@ -1244,6 +1299,17 @@ export default class Scene {
     // Update scene config, and optionally rebuild geometry
     // rebuild can be boolean, or an object containing rebuild options to passthrough
     updateConfig({ loading = false, rebuild = true, serialize_funcs, texture_nodes = {}, normalize = true, fade_in = false } = {}) {
+        // Requested by a `load` event listener (e.g. one that sets globals and calls updateConfig() to apply them):
+        // the scene load in progress applies the update itself. Otherwise the update would rebuild the styles and
+        // start building all tiles, and then the load would throw those tiles away and build them all again.
+        if (this.load_event_update) {
+            const request = this.load_event_update;
+            request.requested = true;
+            request.normalize = request.normalize || normalize;
+            request.texture_nodes = texture_nodes;
+            return request.promise;
+        }
+
         this.generation = ++Scene.generation;
         this.updating++;
 
@@ -1255,7 +1321,13 @@ export default class Scene {
         }
         SceneLoader.hoistTextureNodes(this.config, this.config_bundle, texture_nodes);
 
-        this.trigger(loading ? 'load' : 'update', { config: this.config });
+        let load_event_update = null;
+        if (loading) {
+            load_event_update = this.triggerLoadEvent();
+        }
+        else {
+            this.trigger('update', { config: this.config });
+        }
 
         this.style_manager.init();
         this.view.reset();
@@ -1278,10 +1350,43 @@ export default class Scene {
         this.view.updateBounds();
         this.requestRedraw();
 
-        return done.then(() => {
+        const updated = done.then(() => {
             this.last_render_count = 0; // force re-evaluation of selection map
             this.requestRedraw();
         });
+        if (load_event_update) {
+            // an update requested by a `load` listener is done when the load's update is done
+            updated.then(load_event_update.resolve, load_event_update.reject);
+        }
+        return updated;
+    }
+
+    // Triggers the `load` event. Its listeners can modify the config, also by setting globals and calling
+    // updateConfig(), which is applied here (see updateConfig). Returns that request, or null without one.
+    triggerLoadEvent() {
+        const request = { requested: false, normalize: false, texture_nodes: {} };
+        request.promise = new Promise((resolve, reject) => Object.assign(request, { resolve, reject }));
+        this.load_event_update = request;
+        try {
+            this.trigger('load', { config: this.config });
+            if (!request.requested) {
+                return null;
+            }
+
+            // Like the requested updateConfig() would have: re-apply globals changed by the listener
+            this.config = SceneLoader.applyGlobalProperties(this.config);
+            if (request.normalize) {
+                SceneLoader.normalize(this.config, this.config_bundle, request.texture_nodes);
+            }
+            SceneLoader.hoistTextureNodes(this.config, this.config_bundle, request.texture_nodes);
+        }
+        finally {
+            this.load_event_update = null;
+        }
+
+        // (outside the load event: an update requested by an `update` listener is a separate update, like before)
+        this.trigger('update', { config: this.config });
+        return request;
     }
 
     // Serialize config and send to worker

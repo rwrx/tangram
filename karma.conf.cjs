@@ -2,8 +2,6 @@
 const babel = require('@rollup/plugin-babel').default;
 const resolve = require('@rollup/plugin-node-resolve').default;
 const commonjs = require('@rollup/plugin-commonjs').default;
-const globals = require('rollup-plugin-node-globals');
-const builtins = require('rollup-plugin-node-builtins');
 const json = require('@rollup/plugin-json').default;
 
 module.exports = async function (config) {
@@ -60,14 +58,7 @@ module.exports = async function (config) {
                 babel({
                     exclude: ['node_modules/**', '*.json'],
                     babelHelpers: "runtime"
-                }),
-
-                // These are needed for jszip node-environment compatibility,
-                // previously provided by browserify
-                globals({
-                    exclude: ['node_modules/chai/**'] // plugin's parser doesn't support chai's modern syntax (class static blocks)
-                }),
-                builtins()
+                })
             ]
         },
 

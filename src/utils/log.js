@@ -29,6 +29,17 @@ export default function log (opts, ...msg) {
     let level = (typeof opts === 'object') ? opts.level : opts;
     if (LEVELS[level] <= LEVELS[log.level]) {
         if (Thread.is_worker) {
+            // A message to log once is sent to the main thread once: warnings like these are often logged for
+            // each feature, and each message would be serialized and handled by the main thread (which logs
+            // it only once anyway)
+            if (typeof opts === 'object' && opts.once === true) {
+                const key = JSON.stringify(msg);
+                if (logged_once[key]) {
+                    return Promise.resolve(false);
+                }
+                logged_once[key] = true;
+            }
+
             // Proxy to main thread
             return WorkerBroker.postMessage({ method: '_logProxy', stringify: true }, opts, ...msg);
         }
@@ -73,8 +84,17 @@ if (Thread.is_main) {
 
     log.reset = function () {
         logged_once = {};
+        if (Array.isArray(log.workers)) {
+            WorkerBroker.postMessage(log.workers, '_logResetProxy'); // the messages workers have sent once
+        }
+    };
+}
+else {
+    log.reset = function () {
+        logged_once = {};
     };
 }
 
 WorkerBroker.addTarget('_logProxy', log);                   // proxy log messages from worker to main thread
 WorkerBroker.addTarget('_logSetLevelProxy', log.setLevel);  // proxy log level setting from main to worker thread
+WorkerBroker.addTarget('_logResetProxy', log.reset);        // proxy log reset from main to worker thread

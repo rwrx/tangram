@@ -491,12 +491,95 @@ export function parseLayers (layers, styles) {
     return layer_trees;
 }
 
+// Sibling layers are indexed when there are at least this many
+const MIN_INDEXED_LAYERS = 8;
+
+// Indexes of sibling layers by a feature property, see siblingLayersIndex() (null: not indexed)
+const sibling_layer_indexes = new WeakMap();
+
+// Many sibling layers often filter on the same feature property, e.g. hundreds of `pois` sublayers on `kind`.
+// Checking each of them for each feature is slow, so they're indexed by that property: for a value, the layers
+// whose filter accepts it, together with the layers that don't filter on the property, in their original order.
+// The other layers can't match (doesMatch() returns false for them without side effects), so the matched layers
+// are the same, also for exclusive layers. The index is created once all the (enabled) layers are built - they're
+// built lazily, when they're first matched against a feature.
+function siblingLayersIndex(layers) {
+    if (layers.length < MIN_INDEXED_LAYERS) {
+        return null;
+    }
+    const cached = sibling_layer_indexes.get(layers);
+    if (cached !== undefined && (cached === null || cached.length === layers.length)) {
+        return cached;
+    }
+
+    for (const layer of layers) {
+        if (layer.enabled && !layer.is_built) {
+            return null; // not yet
+        }
+    }
+
+    // The property most of the layers filter on
+    const counts = new Map();
+    for (const layer of layers) {
+        if (layer.enabled && layer.feature_prop_matches) {
+            for (const [key] of layer.feature_prop_matches) {
+                counts.set(key, (counts.get(key) || 0) + 1);
+            }
+        }
+    }
+    let key = null, count = 0;
+    for (const [k, c] of counts) {
+        if (c > count) {
+            key = k;
+            count = c;
+        }
+    }
+    if (count < MIN_INDEXED_LAYERS / 2) {
+        sibling_layer_indexes.set(layers, null);
+        return null;
+    }
+
+    // Layer positions for each value of the property, and of the layers that accept any value (in order)
+    const positions = new Map();
+    const any_value = [];
+    layers.forEach((layer, position) => {
+        const match = layer.enabled && layer.feature_prop_matches && layer.feature_prop_matches.find(m => m[0] === key);
+        if (!match) {
+            any_value.push(position); // includes disabled layers, which never match
+            return;
+        }
+        for (const value of match[1]) {
+            const list = positions.get(value) || [];
+            if (list[list.length - 1] !== position) { // a value can be listed twice
+                list.push(position);
+            }
+            positions.set(value, list);
+        }
+    });
+
+    const by_value = new Map();
+    for (const [value, list] of positions) {
+        by_value.set(value, [...list, ...any_value].sort((a, b) => a - b).map(p => layers[p]));
+    }
+    const index = { key, length: layers.length, by_value, any_value: any_value.map(p => layers[p]) };
+    sibling_layer_indexes.set(layers, index);
+    return index;
+}
+
 export function matchFeature(context, layers, collected_layers, collected_layers_ids) {
     let matched = false;
     let child_matched = false;
 
     if (layers.length === 0) {
         return;
+    }
+
+    // Only the layers that can match the feature, see siblingLayersIndex()
+    const index = siblingLayersIndex(layers);
+    if (index) {
+        const value = context.feature.properties[index.key];
+        // (a filter value matches with ===, so NaN never does: it isn't looked up, Map.get() would find it)
+        layers = (value != null && value === value && index.by_value.get(value)) || index.any_value;
     }
 
     for (let r=0; r < layers.length; r++) {

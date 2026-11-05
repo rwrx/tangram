@@ -18,6 +18,7 @@ import {buildFilter} from '../styles/filter';
 import Texture from '../gl/texture';
 import VertexElements from '../gl/vertex_elements';
 import Label from '../labels/label';
+import { parseSceneText } from './yaml';
 
 const SceneWorker = Object.assign(self, {
 
@@ -42,6 +43,12 @@ const SceneWorker = Object.assign(self, {
         Label.id_prefix = worker_id;
         Label.id_multiplier = num_workers;
         return worker_id;
+    },
+
+    // Parse the text of a scene file for the main thread, which only has to deserialize the result
+    // (a syntax error is reported by parsing again on the main thread, see Scene.parseSceneText)
+    parseSceneText (text) {
+        return parseSceneText(text);
     },
 
     // Import custom external scripts

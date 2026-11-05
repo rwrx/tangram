@@ -11,10 +11,11 @@ import { isReserved } from '../styles/layer';
 const SceneLoader = {
 
     // Load scenes definitions from URL & proprocess
-    async loadScene(url, { path, type } = {}) {
+    // `parse`: optional function that parses the text of scene files (can return a promise), see SceneBundle
+    async loadScene(url, { path, parse } = {}) {
         const errors = [];
         const texture_nodes = {};
-        const scene = await this.loadSceneRecursive({ url, path, type }, null, texture_nodes, errors);
+        const scene = await this.loadSceneRecursive({ url, path, parse }, null, texture_nodes, errors);
         const { config, bundle } = this.finalize(scene);
         if (!config) {
             // root scene failed to load, reject with first error
@@ -35,12 +36,15 @@ const SceneLoader = {
     // Optional *initial* path only (won't be passed to recursive 'import' calls)
     // Useful for loading resources in base scene file from a separate location
     // (e.g. in Tangram Play, when modified local scene should still refer to original resource URLs)
-    async loadSceneRecursive({ url, path, type }, parent, texture_nodes = {}, errors = []) {
+    async loadSceneRecursive({ url, path, parse }, parent, texture_nodes = {}, errors = []) {
         if (!url) {
             return {};
         }
 
-        const bundle = createSceneBundle(url, path, parent, type);
+        const bundle = createSceneBundle(url, path, parent);
+        if (parse) {
+            bundle.parse = parse; // imported scenes inherit it from this bundle
+        }
 
         try {
             let config = await bundle.load();

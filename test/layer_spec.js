@@ -485,3 +485,78 @@ describe('LayerTree.buildDrawGroups(context)', () => {
     });
 
 });
+
+describe('matchFeature() with many sibling layers (indexed by a feature property)', () => {
+    // The matching before the index: each sibling layer is checked
+    function matchEachLayer(context, layers, collected_layers, collected_layers_ids) {
+        let matched = false;
+        for (const current of layers) {
+            if (current.doesMatch(context)) {
+                matched = true;
+                if (current.is_tree && matchEachLayer(context, current.layers, collected_layers, collected_layers_ids)) {
+                    if (current.exclusive) {
+                        break;
+                    }
+                    continue;
+                }
+                collected_layers.push(current);
+                collected_layers_ids.push(current.id);
+                if (current.exclusive) {
+                    break;
+                }
+            }
+        }
+        return matched;
+    }
+
+    const kinds = ['peak', 'saddle', 'spring', 'cafe', 'bench', 'hut', 'shelter', 'viewpoint'];
+    const sublayers = {};
+    kinds.forEach((kind, i) => {
+        sublayers[`${kind}_layer`] = { filter: { kind, $zoom: { min: i % 3 } }, draw: { points: { order: i } } };
+    });
+    Object.assign(sublayers, {
+        several_kinds: { filter: { kind: ['peak', 'hut', 'peak'] }, draw: { points: { order: 20 } } }, // listed twice
+        kind_and_name: { filter: { kind: 'cafe', name: 'Chata' }, draw: { points: { order: 21 } } },
+        any_kind: { filter: { name: 'Chata' }, draw: { points: { order: 22 } } },
+        no_filter: { draw: { points: { order: 23 } } },
+        function_filter: { filter: 'function() { return feature.ele > 2000; }', draw: { points: { order: 24 } } },
+        number_kind: { filter: { kind: 5 }, draw: { points: { order: 25 } } },
+        disabled: { enabled: false, filter: { kind: 'peak' }, draw: { points: { order: 26 } } },
+        exclusive_spring: { exclusive: true, priority: 1, filter: { kind: 'spring' }, draw: { points: { order: 27 } } },
+        nested: {
+            filter: { kind: ['bench', 'viewpoint'] },
+            draw: { points: { order: 28 } },
+            named: { filter: { name: 'Chata' }, draw: { points: { order: 29 } } }
+        }
+    });
+
+    const features = [];
+    for (const kind of [...kinds, 'unknown', 5, '5', null, undefined, NaN]) {
+        for (const name of ['Chata', 'Other', undefined]) {
+            for (const ele of [1000, 2500]) {
+                features.push({ properties: { kind, name, ele } });
+            }
+        }
+    }
+
+    it('matches the same layers, in the same order, as checking each layer', () => {
+        // (each tree from its own copy: building a layer modifies its filter)
+        const config = () => ({ pois: Object.assign({ data: { source: 'osm' } }, JSON.parse(JSON.stringify(sublayers))) });
+        const tree = parseLayers(config()).pois;
+        const reference = parseLayers(config()).pois;
+
+        for (const zoom of [0, 1, 2, 5]) {
+            // twice: the index is created once the layers are built, during the first round
+            for (let round = 0; round < 2; round++) {
+                for (const feature of features) {
+                    const context = { feature, zoom };
+                    const layers = [], ids = [], reference_layers = [], reference_ids = [];
+                    matchFeature(context, [tree], layers, ids);
+                    matchEachLayer(context, [reference], reference_layers, reference_ids);
+                    assert.deepEqual(layers.map(l => l.full_name), reference_layers.map(l => l.full_name),
+                        `zoom ${zoom}, ${JSON.stringify(feature.properties)}`);
+                }
+            }
+        }
+    });
+});
