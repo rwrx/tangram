@@ -1,6 +1,7 @@
 import * as chai from 'chai';
 let assert = chai.assert;
 import sampleScene from './fixtures/sample-scene.json';
+import ShaderProgram from '../src/gl/shader_program';
 
 let nycLatLng = { lng: -73.97229, lat: 40.76456, zoom: 17 };
 
@@ -137,8 +138,66 @@ describe('Scene', function () {
             it('sets the width property', () => {
                 assert.equal(subject.canvas.width, computedWidth);
             });
+
+            it('keeps its drawing buffer when the size is the same', () => {
+                // Setting the canvas size reallocates the drawing buffer, even to the same size
+                const set = sinon.spy();
+                for (const [property, value] of [['width', computedWidth], ['height', computedHeight]]) {
+                    Object.defineProperty(subject.canvas, property, { configurable: true, get: () => value, set });
+                }
+                subject.resizeMap(width, height, devicePixelRatio);
+                delete subject.canvas.width;
+                delete subject.canvas.height;
+
+                assert.notOk(set.called);
+            });
         });
 
+
+    });
+
+    describe('.compileStylePrograms()', () => {
+
+        let style;
+
+        beforeEach(() => {
+            return subject.load().then(() => {
+                sinon.stub(subject.style_manager, 'getActiveBlendOrders').returns([{ blend_order: 0, styles: ['polygons'] }]);
+                // A program that isn't compiled yet
+                ShaderProgram.reset();
+                style = subject.styles.polygons;
+                style.compile_setup = false;
+                style.program = null;
+            });
+        });
+
+        afterEach(() => {
+            subject.style_manager.getActiveBlendOrders.restore();
+        });
+
+        it('starts compiling the programs without waiting for the GPU, then finishes them in later frames', () => {
+            let compiled = subject.compileStylePrograms();
+            // Compiled already only when the browser tells the GPU is done (KHR_parallel_shader_compile)
+            assert.ok(compiled || style.program.compiling);
+
+            for (let frame = 0; !compiled && frame < 1000; frame++) {
+                compiled = subject.compileStylePrograms();
+            }
+            assert.isTrue(compiled);
+            assert.ok(style.program.compiled);
+        });
+
+        it('doesn\'t wait for a program that failed to compile', () => {
+            sinon.stub(style, 'getProgram').throws(new Error('compile error'));
+            const warning = sinon.spy();
+            subject.subscribe({ warning });
+
+            assert.isTrue(subject.compileStylePrograms());
+            assert.ok(warning.calledWithMatch({ type: 'styles', style }));
+
+            subject.unsubscribe({ warning });
+            style.getProgram.restore();
+        });
 
     });
 

@@ -22,6 +22,7 @@ export default class ShaderProgram {
         this.program = null;
         this.compiled = false;
         this.compiling = false;
+        this.pending = null; // the GL objects being compiled, see startProgram()
         this.error = null;
 
         // key/values inserted as #defines into shaders at compile-time
@@ -175,16 +176,42 @@ export default class ShaderProgram {
         this.computed_vertex_source = this.computed_vertex_source.replace(re_continue_line, '');
         this.computed_fragment_source = this.computed_fragment_source.replace(re_continue_line, '');
 
-        // Compile & set uniforms to cached values
+        // Only start compiling: the GPU compiles while the page goes on, finishCompile() waits for it and checks it
+        this.pending = ShaderProgram.startProgram(this.gl, this.program, this.computed_vertex_source, this.computed_fragment_source);
+        this.program = this.pending.program;
+    }
+
+    // Has the program compiled? Finishes compiling when the GPU is done (throws the compile errors like compile()).
+    // Doesn't wait for the GPU: known only with KHR_parallel_shader_compile, without it false until finishCompile().
+    isCompiled() {
+        if (this.compiled || !this.compiling) {
+            return this.compiled;
+        }
+        const parallel = getExtension(this.gl, 'KHR_parallel_shader_compile');
+        if (!parallel || !this.gl.getProgramParameter(this.program, parallel.COMPLETION_STATUS_KHR)) {
+            return false;
+        }
+        this.finishCompile();
+        return true;
+    }
+
+    // Waits for the GPU to compile the program (if it's still compiling), then checks it and sets its uniforms
+    finishCompile() {
+        if (!this.compiling) {
+            return;
+        }
+
         try {
-            this.program = ShaderProgram.updateProgram(this.gl, this.program, this.computed_vertex_source, this.computed_fragment_source);
+            ShaderProgram.finishProgram(this.gl, this.pending);
             this.compiled = true;
             this.compiling = false;
+            this.pending = null;
         }
         catch(error) {
             this.program = null;
             this.compiled = false;
             this.compiling = false;
+            this.pending = null;
             this.error = error;
 
             // shader error info
@@ -637,14 +664,15 @@ ShaderProgram.replaceBlock = function (key, ...blocks) {
     ShaderProgram.addBlock(key, ...blocks);
 };
 
-// Compile & link a WebGL program from provided vertex and fragment shader sources
-// update a program if one is passed in. Create one if not. Alert and don't update anything if the shaders don't compile.
-ShaderProgram.updateProgram = function (gl, program, vertex_shader_source, fragment_shader_source) {
+// Start compiling & linking a WebGL program from provided vertex and fragment shader sources, without waiting for the
+// GPU to finish (queries like COMPILE_STATUS would wait): finishProgram() checks the result.
+// Updates a program if one is passed in, creates one if not.
+ShaderProgram.startProgram = function (gl, program, vertex_shader_source, fragment_shader_source) {
     // Program with this exact vertex and fragment shader sources already cached?
     let key = hashString(gl._tangram_id + '::' + vertex_shader_source + '::' + fragment_shader_source);
     if (ShaderProgram.programs_by_source[key]) {
         log('trace', 'Reusing identical source GL program object');
-        return ShaderProgram.programs_by_source[key];
+        return { program: ShaderProgram.programs_by_source[key], key };
     }
 
     var vertex_shader = ShaderProgram.createShader(gl, vertex_shader_source, gl.VERTEX_SHADER);
@@ -661,7 +689,7 @@ ShaderProgram.updateProgram = function (gl, program, vertex_shader_source, fragm
     }
 
     if (vertex_shader == null || fragment_shader == null) {
-        return program;
+        return { program, key, unlinked: true };
     }
 
     gl.attachShader(program, vertex_shader);
@@ -679,24 +707,52 @@ ShaderProgram.updateProgram = function (gl, program, vertex_shader_source, fragm
 
     // TODO: reference count and delete shader objects when no programs reference them
 
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-        let message = new Error(
-            `WebGL program error:
-            VALIDATE_STATUS: ${gl.getProgramParameter(program, gl.VALIDATE_STATUS)}
-            ERROR: ${gl.getError()}
-            --- Vertex Shader ---
-            ${vertex_shader_source}
-            --- Fragment Shader ---
-            ${fragment_shader_source}`);
-
-        throw Object.assign(new Error(message), { type: 'program' });
-    }
-
+    // Cached already, so a program with the same sources reuses it while it's compiling
     ShaderProgram.programs_by_source[key] = program; // cache by exact source
-    return program;
+    return {
+        program, key,
+        vertex_shader, vertex_shader_source,
+        fragment_shader, fragment_shader_source
+    };
 };
 
-// Compile a vertex or fragment shader from provided source
+// Check a program started by startProgram(), throws its compile or link errors (waits for the GPU to compile it)
+ShaderProgram.finishProgram = function (gl, pending) {
+    const { program, key, unlinked } = pending;
+    if (unlinked) {
+        return;
+    }
+
+    try {
+        // (a cached program from another ShaderProgram has no shaders here, they compiled when it was cached)
+        if (pending.vertex_shader) {
+            ShaderProgram.checkShader(gl, pending.vertex_shader, pending.vertex_shader_source, gl.VERTEX_SHADER);
+            ShaderProgram.checkShader(gl, pending.fragment_shader, pending.fragment_shader_source, gl.FRAGMENT_SHADER);
+        }
+
+        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+            let message = new Error(
+                `WebGL program error:
+                VALIDATE_STATUS: ${gl.getProgramParameter(program, gl.VALIDATE_STATUS)}
+                ERROR: ${gl.getError()}
+                --- Vertex Shader ---
+                ${pending.vertex_shader_source}
+                --- Fragment Shader ---
+                ${pending.fragment_shader_source}`);
+
+            throw Object.assign(new Error(message), { type: 'program' });
+        }
+    }
+    catch (error) {
+        // Not reused (only programs that compiled are)
+        if (ShaderProgram.programs_by_source[key] === program) {
+            delete ShaderProgram.programs_by_source[key];
+        }
+        throw error;
+    }
+};
+
+// Start compiling a vertex or fragment shader from provided source (checked by checkShader())
 ShaderProgram.createShader = function (gl, source, stype) {
     // Program with identical vertex and fragment shader sources already cached?
     let key = hashString(gl._tangram_id + '::' + source);
@@ -710,13 +766,22 @@ ShaderProgram.createShader = function (gl, source, stype) {
     gl.shaderSource(shader, source);
     gl.compileShader(shader);
 
+    ShaderProgram.shaders_by_source[key] = shader; // cache by exact source
+    return shader;
+};
+
+// Throw the shader's compile errors (waits for the GPU to compile it)
+ShaderProgram.checkShader = function (gl, shader, source, stype) {
     if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        // Not reused (only shaders that compiled are)
+        let key = hashString(gl._tangram_id + '::' + source);
+        if (ShaderProgram.shaders_by_source[key] === shader) {
+            delete ShaderProgram.shaders_by_source[key];
+        }
+
         let type = (stype === gl.VERTEX_SHADER ? 'vertex' : 'fragment');
         let message = gl.getShaderInfoLog(shader);
         let errors = parseShaderErrors(message);
         throw Object.assign(new Error(message), { type, errors });
     }
-
-    ShaderProgram.shaders_by_source[key] = shader; // cache by exact source
-    return shader;
 };

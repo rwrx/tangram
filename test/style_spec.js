@@ -108,6 +108,57 @@ describe('Styles:', () => {
             assert.ok(style_manager.styles.polygons.program.compiled);
         });
 
+        it('starts compiling a program without waiting for the GPU, then finishes it', () => {
+            ShaderProgram.reset();
+            const style = style_manager.styles.polygons;
+            style.init();
+            style.setGL(gl);
+
+            const program = style.getProgram('program', { wait: false });
+            // Compiled already only when the browser tells the GPU is done (KHR_parallel_shader_compile)
+            assert.ok(program.compiling || program.compiled);
+
+            program.finishCompile();
+            assert.ok(program.compiled);
+            assert.notOk(program.compiling);
+            assert.strictEqual(style.getProgram(), program);
+        });
+
+        it('reuses a program with the same sources while it compiles', () => {
+            ShaderProgram.reset();
+            style_manager.create('first', { base: 'polygons' });
+            style_manager.create('second', { base: 'polygons' });
+            const [first, second] = ['first', 'second'].map(name => {
+                const style = style_manager.styles[name];
+                style.init();
+                style.setGL(gl);
+                return style.getProgram('program', { wait: false });
+            });
+
+            first.finishCompile();
+            second.finishCompile();
+            assert.ok(first.compiled);
+            assert.ok(second.compiled);
+            assert.strictEqual(first.program, second.program);
+        });
+
+        it('throws the shader errors when it finishes compiling', () => {
+            ShaderProgram.reset();
+            style_manager.create('broken', {
+                base: 'polygons',
+                shaders: { blocks: { color: 'color.rgb = not_defined;' } }
+            });
+            const style = style_manager.styles.broken;
+            style.init();
+            style.setGL(gl);
+
+            assert.throws(() => style.getProgram());
+            assert.equal(style.program.error.type, 'fragment');
+            assert.isNotEmpty(style.program.shader_errors);
+            // Not compiled again
+            assert.isUndefined(style.getProgram());
+        });
+
         it('injects a dependent uniform in a custom style', () => {
             style_manager.create('scale', sampleScene.styles.scale);
             style_manager.styles.scale.init();

@@ -9,6 +9,7 @@ import sliceObject from '../utils/slice';
 import Context from '../gl/context';
 import Texture from '../gl/texture';
 import ShaderProgram from '../gl/shader_program';
+import getExtension from '../gl/extensions';
 import VertexArrayObject from '../gl/vao';
 import {StyleManager} from '../styles/style_manager';
 import {Style} from '../styles/style';
@@ -495,6 +496,11 @@ export default class Scene {
             this.ready() === false
         );
 
+        // A frame is rendered when the programs of all its styles have compiled, not with some styles missing
+        if (will_render && main && !this.compileStylePrograms()) {
+            will_render = false;
+        }
+
         // Pre-render loop hook
         this.trigger('pre_update', will_render);
 
@@ -773,14 +779,10 @@ export default class Scene {
         return render_count;
     }
 
-    setupStyle(style, program_key) {
-        // Get shader program from style, lazily compiling if necessary
-        let program;
+    // Get shader program from style, lazily compiling if necessary (see Style.getProgram() for the options)
+    getStyleProgram(style, program_key, options) {
         try {
-            program = style.getProgram(program_key);
-            if (!program) {
-                return;
-            }
+            return style.getProgram(program_key, options);
         }
         catch(error) {
             this.trigger('warning', {
@@ -789,6 +791,45 @@ export default class Scene {
                 style,
                 shader_errors: style.program && style.program.shader_errors
             });
+        }
+    }
+
+    // Compile the main programs of the styles to render, without blocking the page for long: waiting for the GPU to
+    // compile a program blocks it (e.g. ~15 ms for one of Trackbook's styles on a fast desktop, a long task with
+    // other programs). The GPU compiles all the new programs while the page goes on, and they're checked in the next
+    // frames: when the browser tells when a program has compiled (KHR_parallel_shader_compile), or by waiting for
+    // them for at most COMPILE_WAIT_PER_FRAME ms per frame (probably done by then).
+    // Returns whether all have compiled (programs that failed to compile don't count, their styles aren't rendered).
+    compileStylePrograms() {
+        const parallel = getExtension(this.gl, 'KHR_parallel_shader_compile') != null;
+        const wait_until = performance.now() + Scene.COMPILE_WAIT_PER_FRAME;
+        let compiled = true;
+        for (const { styles } of this.style_manager.getActiveBlendOrders()) {
+            for (const style_name of styles) {
+                const style = this.styles[style_name];
+                if (!style) {
+                    continue;
+                }
+                // Started in an earlier frame (not just now, the GPU hasn't had time to compile it yet)
+                const started = style.program && style.program.compiling;
+                let program = this.getStyleProgram(style, 'program', { wait: false });
+                if (program && !program.compiled && !parallel && started && performance.now() < wait_until) {
+                    program = this.getStyleProgram(style, 'program'); // waits for the GPU
+                }
+                if (program && !program.compiled) {
+                    compiled = false;
+                }
+            }
+        }
+        if (!compiled) {
+            this.gl.flush(); // the GPU starts compiling the new programs now
+        }
+        return compiled;
+    }
+
+    setupStyle(style, program_key) {
+        const program = this.getStyleProgram(style, program_key);
+        if (!program) {
             return;
         }
 
@@ -1520,3 +1561,4 @@ export default class Scene {
 
 Scene.id = 0;         // unique id for a scene instance
 Scene.generation = 0; // id that is incremented each time a scene config is re-parsed
+Scene.COMPILE_WAIT_PER_FRAME = 8; // ms a frame waits for the GPU to compile shader programs (see compileStylePrograms)

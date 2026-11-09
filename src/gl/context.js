@@ -50,8 +50,16 @@ Context.resize = function (gl, width, height, device_pixel_ratio)
     device_pixel_ratio = device_pixel_ratio || window.devicePixelRatio || 1;
     gl.canvas.style.width = width + 'px';
     gl.canvas.style.height = height + 'px';
-    gl.canvas.width = Math.round(width * device_pixel_ratio);
-    gl.canvas.height = Math.round(height * device_pixel_ratio);
+    // Setting the size reallocates (and clears) the drawing buffer even when the size doesn't change,
+    // ~4 ms for a desktop-sized map (the scene resizes the map again when it loads)
+    const canvas_width = Math.round(width * device_pixel_ratio);
+    const canvas_height = Math.round(height * device_pixel_ratio);
+    if (gl.canvas.width !== canvas_width) {
+        gl.canvas.width = canvas_width;
+    }
+    if (gl.canvas.height !== canvas_height) {
+        gl.canvas.height = canvas_height;
+    }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
 };

@@ -424,8 +424,9 @@ export var Style = {
         return mesh.render();
     },
 
-    // Get a specific program, compiling if necessary
-    getProgram (key = 'program') {
+    // Get a specific program, compiling if necessary. Without `wait`, the program may be still compiling
+    // (the GPU compiles it while the page goes on, see ShaderProgram.isCompiled()).
+    getProgram (key = 'program', { wait = true } = {}) {
         this.compileSetup();
 
         const program = this[key];
@@ -434,9 +435,17 @@ export var Style = {
         }
 
         if (!program.compiled) {
-            log('debug', `Compiling style '${this.name}', program key '${key}'`);
             try {
-                program.compile();
+                if (!program.compiling) {
+                    log('debug', `Compiling style '${this.name}', program key '${key}'`);
+                    program.compile();
+                }
+                if (wait) {
+                    program.finishCompile();
+                }
+                else {
+                    program.isCompiled();
+                }
             }
             catch (e) {
                 log('error', `Style: error compiling program for style '${this.name}' (program key '${key}')`,

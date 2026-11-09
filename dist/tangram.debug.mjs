@@ -1958,6 +1958,7 @@ class ShaderProgram {
     this.program = null;
     this.compiled = false;
     this.compiling = false;
+    this.pending = null; // the GL objects being compiled, see startProgram()
     this.error = null;
 
     // key/values inserted as #defines into shaders at compile-time
@@ -2096,15 +2097,40 @@ class ShaderProgram {
     this.computed_vertex_source = this.computed_vertex_source.replace(re_continue_line, '');
     this.computed_fragment_source = this.computed_fragment_source.replace(re_continue_line, '');
 
-    // Compile & set uniforms to cached values
+    // Only start compiling: the GPU compiles while the page goes on, finishCompile() waits for it and checks it
+    this.pending = ShaderProgram.startProgram(this.gl, this.program, this.computed_vertex_source, this.computed_fragment_source);
+    this.program = this.pending.program;
+  }
+
+  // Has the program compiled? Finishes compiling when the GPU is done (throws the compile errors like compile()).
+  // Doesn't wait for the GPU: known only with KHR_parallel_shader_compile, without it false until finishCompile().
+  isCompiled() {
+    if (this.compiled || !this.compiling) {
+      return this.compiled;
+    }
+    const parallel = getExtension(this.gl, 'KHR_parallel_shader_compile');
+    if (!parallel || !this.gl.getProgramParameter(this.program, parallel.COMPLETION_STATUS_KHR)) {
+      return false;
+    }
+    this.finishCompile();
+    return true;
+  }
+
+  // Waits for the GPU to compile the program (if it's still compiling), then checks it and sets its uniforms
+  finishCompile() {
+    if (!this.compiling) {
+      return;
+    }
     try {
-      this.program = ShaderProgram.updateProgram(this.gl, this.program, this.computed_vertex_source, this.computed_fragment_source);
+      ShaderProgram.finishProgram(this.gl, this.pending);
       this.compiled = true;
       this.compiling = false;
+      this.pending = null;
     } catch (error) {
       this.program = null;
       this.compiled = false;
       this.compiling = false;
+      this.pending = null;
       this.error = error;
 
       // shader error info
@@ -2548,14 +2574,18 @@ ShaderProgram.replaceBlock = function (key, ...blocks) {
   ShaderProgram.addBlock(key, ...blocks);
 };
 
-// Compile & link a WebGL program from provided vertex and fragment shader sources
-// update a program if one is passed in. Create one if not. Alert and don't update anything if the shaders don't compile.
-ShaderProgram.updateProgram = function (gl, program, vertex_shader_source, fragment_shader_source) {
+// Start compiling & linking a WebGL program from provided vertex and fragment shader sources, without waiting for the
+// GPU to finish (queries like COMPILE_STATUS would wait): finishProgram() checks the result.
+// Updates a program if one is passed in, creates one if not.
+ShaderProgram.startProgram = function (gl, program, vertex_shader_source, fragment_shader_source) {
   // Program with this exact vertex and fragment shader sources already cached?
   let key = hashString(gl._tangram_id + '::' + vertex_shader_source + '::' + fragment_shader_source);
   if (ShaderProgram.programs_by_source[key]) {
     log('trace', 'Reusing identical source GL program object');
-    return ShaderProgram.programs_by_source[key];
+    return {
+      program: ShaderProgram.programs_by_source[key],
+      key
+    };
   }
   var vertex_shader = ShaderProgram.createShader(gl, vertex_shader_source, gl.VERTEX_SHADER);
   var fragment_shader = ShaderProgram.createShader(gl, fragment_shader_source, gl.FRAGMENT_SHADER);
@@ -2569,7 +2599,11 @@ ShaderProgram.updateProgram = function (gl, program, vertex_shader_source, fragm
     program = gl.createProgram();
   }
   if (vertex_shader == null || fragment_shader == null) {
-    return program;
+    return {
+      program,
+      key,
+      unlinked: true
+    };
   }
   gl.attachShader(program, vertex_shader);
   gl.attachShader(program, fragment_shader);
@@ -2585,23 +2619,56 @@ ShaderProgram.updateProgram = function (gl, program, vertex_shader_source, fragm
 
   // TODO: reference count and delete shader objects when no programs reference them
 
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-    let message = new Error(`WebGL program error:
-            VALIDATE_STATUS: ${gl.getProgramParameter(program, gl.VALIDATE_STATUS)}
-            ERROR: ${gl.getError()}
-            --- Vertex Shader ---
-            ${vertex_shader_source}
-            --- Fragment Shader ---
-            ${fragment_shader_source}`);
-    throw Object.assign(new Error(message), {
-      type: 'program'
-    });
-  }
+  // Cached already, so a program with the same sources reuses it while it's compiling
   ShaderProgram.programs_by_source[key] = program; // cache by exact source
-  return program;
+  return {
+    program,
+    key,
+    vertex_shader,
+    vertex_shader_source,
+    fragment_shader,
+    fragment_shader_source
+  };
 };
 
-// Compile a vertex or fragment shader from provided source
+// Check a program started by startProgram(), throws its compile or link errors (waits for the GPU to compile it)
+ShaderProgram.finishProgram = function (gl, pending) {
+  const {
+    program,
+    key,
+    unlinked
+  } = pending;
+  if (unlinked) {
+    return;
+  }
+  try {
+    // (a cached program from another ShaderProgram has no shaders here, they compiled when it was cached)
+    if (pending.vertex_shader) {
+      ShaderProgram.checkShader(gl, pending.vertex_shader, pending.vertex_shader_source, gl.VERTEX_SHADER);
+      ShaderProgram.checkShader(gl, pending.fragment_shader, pending.fragment_shader_source, gl.FRAGMENT_SHADER);
+    }
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      let message = new Error(`WebGL program error:
+                VALIDATE_STATUS: ${gl.getProgramParameter(program, gl.VALIDATE_STATUS)}
+                ERROR: ${gl.getError()}
+                --- Vertex Shader ---
+                ${pending.vertex_shader_source}
+                --- Fragment Shader ---
+                ${pending.fragment_shader_source}`);
+      throw Object.assign(new Error(message), {
+        type: 'program'
+      });
+    }
+  } catch (error) {
+    // Not reused (only programs that compiled are)
+    if (ShaderProgram.programs_by_source[key] === program) {
+      delete ShaderProgram.programs_by_source[key];
+    }
+    throw error;
+  }
+};
+
+// Start compiling a vertex or fragment shader from provided source (checked by checkShader())
 ShaderProgram.createShader = function (gl, source, stype) {
   // Program with identical vertex and fragment shader sources already cached?
   let key = hashString(gl._tangram_id + '::' + source);
@@ -2612,7 +2679,18 @@ ShaderProgram.createShader = function (gl, source, stype) {
   let shader = gl.createShader(stype);
   gl.shaderSource(shader, source);
   gl.compileShader(shader);
+  ShaderProgram.shaders_by_source[key] = shader; // cache by exact source
+  return shader;
+};
+
+// Throw the shader's compile errors (waits for the GPU to compile it)
+ShaderProgram.checkShader = function (gl, shader, source, stype) {
   if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    // Not reused (only shaders that compiled are)
+    let key = hashString(gl._tangram_id + '::' + source);
+    if (ShaderProgram.shaders_by_source[key] === shader) {
+      delete ShaderProgram.shaders_by_source[key];
+    }
     let type = stype === gl.VERTEX_SHADER ? 'vertex' : 'fragment';
     let message = gl.getShaderInfoLog(shader);
     let errors = parseShaderErrors(message);
@@ -2621,8 +2699,6 @@ ShaderProgram.createShader = function (gl, source, stype) {
       errors
     });
   }
-  ShaderProgram.shaders_by_source[key] = shader; // cache by exact source
-  return shader;
 };
 
 // Creates a Vertex Array Object if the extension is available, or falls back on standard attribute calls
@@ -6884,17 +6960,27 @@ var Style = {
   render(mesh) {
     return mesh.render();
   },
-  // Get a specific program, compiling if necessary
-  getProgram(key = 'program') {
+  // Get a specific program, compiling if necessary. Without `wait`, the program may be still compiling
+  // (the GPU compiles it while the page goes on, see ShaderProgram.isCompiled()).
+  getProgram(key = 'program', {
+    wait = true
+  } = {}) {
     this.compileSetup();
     const program = this[key];
     if (!program || program.error) {
       return;
     }
     if (!program.compiled) {
-      log('debug', `Compiling style '${this.name}', program key '${key}'`);
       try {
-        program.compile();
+        if (!program.compiling) {
+          log('debug', `Compiling style '${this.name}', program key '${key}'`);
+          program.compile();
+        }
+        if (wait) {
+          program.finishCompile();
+        } else {
+          program.isCompiled();
+        }
       } catch (e) {
         log('error', `Style: error compiling program for style '${this.name}' (program key '${key}')`, this, e.stack, e.type, e.shader_errors);
         throw e; // re-throw so users can be notified via event subscriptions
@@ -24268,6 +24354,7 @@ exports.createObjectURL = createObjectURL;
 exports.debugSettings = debugSettings$1;
 exports.debugSumLayerStats = debugSumLayerStats;
 exports.extensionForURL = extensionForURL;
+exports.getExtension = getExtension;
 exports.isRelativeURL = isRelativeURL;
 exports.isReserved = isReserved;
 exports.layerCache = layerCache;
@@ -24680,8 +24767,16 @@ Context.resize = function (gl, width, height, device_pixel_ratio) {
   device_pixel_ratio = device_pixel_ratio || window.devicePixelRatio || 1;
   gl.canvas.style.width = width + 'px';
   gl.canvas.style.height = height + 'px';
-  gl.canvas.width = Math.round(width * device_pixel_ratio);
-  gl.canvas.height = Math.round(height * device_pixel_ratio);
+  // Setting the size reallocates (and clears) the drawing buffer even when the size doesn't change,
+  // ~4 ms for a desktop-sized map (the scene resizes the map again when it loads)
+  const canvas_width = Math.round(width * device_pixel_ratio);
+  const canvas_height = Math.round(height * device_pixel_ratio);
+  if (gl.canvas.width !== canvas_width) {
+    gl.canvas.width = canvas_width;
+  }
+  if (gl.canvas.height !== canvas_height) {
+    gl.canvas.height = canvas_height;
+  }
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
 };
@@ -26766,6 +26861,11 @@ class Scene {
     let selection = this.selection ? this.selection.hasPendingRequests() : false;
     var will_render = !(main === false && selection === false || this.initialized === false || this.updating > 0 || this.ready() === false);
 
+    // A frame is rendered when the programs of all its styles have compiled, not with some styles missing
+    if (will_render && main && !this.compileStylePrograms()) {
+      will_render = false;
+    }
+
     // Pre-render loop hook
     this.trigger('pre_update', will_render);
 
@@ -27037,14 +27137,11 @@ class Scene {
     }
     return render_count;
   }
-  setupStyle(style, program_key) {
-    // Get shader program from style, lazily compiling if necessary
-    let program;
+
+  // Get shader program from style, lazily compiling if necessary (see Style.getProgram() for the options)
+  getStyleProgram(style, program_key, options) {
     try {
-      program = style.getProgram(program_key);
-      if (!program) {
-        return;
-      }
+      return style.getProgram(program_key, options);
     } catch (error) {
       this.trigger('warning', {
         type: 'styles',
@@ -27052,6 +27149,48 @@ class Scene {
         style,
         shader_errors: style.program && style.program.shader_errors
       });
+    }
+  }
+
+  // Compile the main programs of the styles to render, without blocking the page for long: waiting for the GPU to
+  // compile a program blocks it (e.g. ~15 ms for one of Trackbook's styles on a fast desktop, a long task with
+  // other programs). The GPU compiles all the new programs while the page goes on, and they're checked in the next
+  // frames: when the browser tells when a program has compiled (KHR_parallel_shader_compile), or by waiting for
+  // them for at most COMPILE_WAIT_PER_FRAME ms per frame (probably done by then).
+  // Returns whether all have compiled (programs that failed to compile don't count, their styles aren't rendered).
+  compileStylePrograms() {
+    const parallel = topojson.getExtension(this.gl, 'KHR_parallel_shader_compile') != null;
+    const wait_until = performance.now() + Scene.COMPILE_WAIT_PER_FRAME;
+    let compiled = true;
+    for (const {
+      styles
+    } of this.style_manager.getActiveBlendOrders()) {
+      for (const style_name of styles) {
+        const style = this.styles[style_name];
+        if (!style) {
+          continue;
+        }
+        // Started in an earlier frame (not just now, the GPU hasn't had time to compile it yet)
+        const started = style.program && style.program.compiling;
+        let program = this.getStyleProgram(style, 'program', {
+          wait: false
+        });
+        if (program && !program.compiled && !parallel && started && performance.now() < wait_until) {
+          program = this.getStyleProgram(style, 'program'); // waits for the GPU
+        }
+        if (program && !program.compiled) {
+          compiled = false;
+        }
+      }
+    }
+    if (!compiled) {
+      this.gl.flush(); // the GPU starts compiling the new programs now
+    }
+    return compiled;
+  }
+  setupStyle(style, program_key) {
+    const program = this.getStyleProgram(style, program_key);
+    if (!program) {
       return;
     }
     program.use();
@@ -27861,6 +28000,7 @@ class Scene {
 }
 Scene.id = 0; // unique id for a scene instance
 Scene.generation = 0; // id that is incremented each time a scene config is re-parsed
+Scene.COMPILE_WAIT_PER_FRAME = 8; // ms a frame waits for the GPU to compile shader programs (see compileStylePrograms)
 
 // Debounce a function
 // https://davidwalsh.name/javascript-debounce-function
@@ -28445,7 +28585,7 @@ return index;
 // Script modules can't expose exports
 try {
 	Tangram.debug.ESM = true; // mark build as ES module
-	Tangram.debug.SHA = 'c7a92619549bb1ae2bce8bf6ba610a6c2c199c20';
+	Tangram.debug.SHA = '8904192bcf962509675a62481796589e03ca73cf';
 	if (true === true && typeof window === 'object') {
 	    window.Tangram = Tangram;
 	}
