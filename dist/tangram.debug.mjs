@@ -614,7 +614,10 @@ Utils.io = function (url, timeout = 60000, responseType = 'text', method = 'GET'
             status: request.status
           });
         } else {
-          reject(Error('Request error with a status of ' + request.statusText));
+          // statusText is empty over HTTP/2, the status lets callers tell e.g. a missing tile (404) apart
+          let error = Error(`Request error with a status of ${request.status} ${request.statusText}`);
+          error.status = request.status;
+          reject(error);
         }
       };
       request.onerror = evt => {
@@ -5885,10 +5888,22 @@ class NetworkSource extends DataSource {
           resolve(dest);
         });
       }).catch(error => {
-        source_data.error = error.stack;
+        const missing_tile_layers = error.status != null ? this.missingTileLayers(error.status) : null;
+        if (missing_tile_layers) {
+          source_data.layers = missing_tile_layers;
+        } else {
+          source_data.error = error.stack;
+        }
         resolve(dest); // resolve request but pass along error
       });
     });
+  }
+
+  // Layers of a tile the server answered with an HTTP error status for (e.g. 404, it doesn't have the tile),
+  // or null when such a tile stays empty (and is an error). Sub-classes can implement
+  missingTileLayers(/*status*/
+  ) {
+    return null;
   }
   validate(source) {
     if (typeof source.url !== 'string') {
@@ -22874,6 +22889,58 @@ class MVTSource extends NetworkTileSource {
       // skip parsing entirely (default behavior)
       this.parse_json_type = PARSE_JSON_TYPE.NONE;
     }
+
+    // Optionally fill a tile the server doesn't have (404) with a polygon covering the whole tile in each layer,
+    // with the given properties, e.g. `{ water: { kind: ocean } }` when the server has no tiles of the open sea
+    const missing_tile_layers = source.missing_tile_layers;
+    if (missing_tile_layers != null && typeof missing_tile_layers === 'object' && !Array.isArray(missing_tile_layers) && Object.values(missing_tile_layers).every(properties => properties != null && typeof properties === 'object')) {
+      this.missing_tile_layers = missing_tile_layers;
+    } else if (missing_tile_layers != null) {
+      log({
+        level: 'warn',
+        once: true
+      }, `Data source '${this.name}': 'missing_tile_layers' parameter should be an object of layer names ` + `and their feature properties (was '${JSON.stringify(missing_tile_layers)}')`);
+    }
+
+    // The HTTP statuses the server answers with for a tile it doesn't have, 404 by default (some servers
+    // answer e.g. 500 for the tiles of the open sea)
+    const missing_tile_statuses = source.missing_tile_statuses;
+    if (Array.isArray(missing_tile_statuses) && missing_tile_statuses.every(Number.isInteger)) {
+      this.missing_tile_statuses = missing_tile_statuses;
+    } else {
+      if (missing_tile_statuses != null) {
+        log({
+          level: 'warn',
+          once: true
+        }, `Data source '${this.name}': 'missing_tile_statuses' parameter should be an array of HTTP ` + `statuses (was '${JSON.stringify(missing_tile_statuses)}')`);
+      }
+      this.missing_tile_statuses = [404];
+    }
+  }
+  missingTileLayers(status) {
+    if (!this.missing_tile_layers || this.missing_tile_statuses.indexOf(status) === -1) {
+      return null;
+    }
+
+    // Wound like the outer rings of MVT polygons (before load() flips the Y coordinates), e.g. the ocean
+    // of a tile that's all sea, so the polygon can also set the source's default winding
+    const size = Geo$1.tile_scale;
+    const layers = {};
+    for (const layer in this.missing_tile_layers) {
+      layers[layer] = {
+        type: 'FeatureCollection',
+        features: [{
+          type: 'Feature',
+          // New objects for each tile, the geometry is transformed in place and the properties can be changed
+          geometry: {
+            type: 'Polygon',
+            coordinates: [[[size, size], [0, size], [0, 0], [size, 0], [size, size]]]
+          },
+          properties: Object.assign({}, this.missing_tile_layers[layer])
+        }]
+      };
+    }
+    return layers;
   }
   parseSourceData(tile, source, response) {
     // Convert Mapbox vector tile to GeoJSON
@@ -28585,7 +28652,7 @@ return index;
 // Script modules can't expose exports
 try {
 	Tangram.debug.ESM = true; // mark build as ES module
-	Tangram.debug.SHA = '666abf2fdc602e5b80ccf17857856e3645ec6241';
+	Tangram.debug.SHA = '7d4e6592a6fbb85c91be8896296a877fbc1cfb92';
 	if (true === true && typeof window === 'object') {
 	    window.Tangram = Tangram;
 	}

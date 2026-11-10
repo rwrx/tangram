@@ -65,7 +65,10 @@ Utils.io = function (url, timeout = 60000, responseType = 'text', method = 'GET'
                     resolve({ body: null, status: request.status });
                 }
                 else {
-                    reject(Error('Request error with a status of ' + request.statusText));
+                    // statusText is empty over HTTP/2, the status lets callers tell e.g. a missing tile (404) apart
+                    let error = Error(`Request error with a status of ${request.status} ${request.statusText}`);
+                    error.status = request.status;
+                    reject(error);
                 }
             };
             request.onerror = (evt) => {

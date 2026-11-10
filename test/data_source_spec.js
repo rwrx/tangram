@@ -253,5 +253,136 @@ describe('DataSource', () => {
             });
         });
 
+        describe('.load(tile) of a tile the server doesn\'t have', () => {
+            const missing_tile_layers = { water: { kind: 'ocean', sort_rank: 200 } };
+
+            const getHttpError = (status) => {
+                const error = new Error(`Request error with a status of ${status}`);
+                error.status = status;
+                return error;
+            };
+
+            let source;
+            const loadTile = async (source_options, error) => {
+                sinon.stub(Utils, 'io').returns(Promise.reject(error));
+                const tile = getMockTile();
+                source = new MVTSource(Object.assign({}, options, source_options));
+                await source.load(tile);
+                return tile;
+            };
+
+            afterEach(() => {
+                Utils.io.restore();
+            });
+
+            it('fills it with a polygon covering the whole tile in each layer, with their properties', async () => {
+                const tile = await loadTile({ missing_tile_layers }, getHttpError(404));
+
+                assert.isNull(tile.source_data.error);
+                assert.deepEqual(Object.keys(tile.source_data.layers), ['water']);
+                const features = tile.source_data.layers.water.features;
+                assert.lengthOf(features, 1);
+                assert.deepEqual(features[0].properties, missing_tile_layers.water);
+                assert.equal(features[0].geometry.type, 'Polygon');
+                // The Y coordinates are flipped and the tile slightly scaled up to cover seams
+                const ring = features[0].geometry.coordinates[0];
+                const xs = ring.map(([x]) => x);
+                const ys = ring.map(([, y]) => y);
+                assert.isAtMost(Math.min(...xs), 0);
+                assert.isAtLeast(Math.max(...xs), Geo.tile_scale);
+                assert.isAtMost(Math.min(...ys), -Geo.tile_scale);
+                assert.isAtLeast(Math.max(...ys), 0);
+                // Wound like the outer rings of MVT polygons (e.g. the ocean of a tile that's all sea), which are
+                // counterclockwise once the Y coordinates are flipped
+                assert.equal(source.default_winding, 'CCW');
+            });
+
+            it('gives each tile its own features', async () => {
+                const tile = await loadTile({ missing_tile_layers }, getHttpError(404));
+                Utils.io.restore();
+                const other_tile = await loadTile({ missing_tile_layers }, getHttpError(404));
+
+                const [feature] = tile.source_data.layers.water.features;
+                const [other_feature] = other_tile.source_data.layers.water.features;
+                assert.notStrictEqual(feature.geometry, other_feature.geometry);
+                assert.notStrictEqual(feature.properties, other_feature.properties);
+                assert.notStrictEqual(feature.properties, missing_tile_layers.water);
+            });
+
+            it('leaves it empty with an error without missing_tile_layers', async () => {
+                const tile = await loadTile({}, getHttpError(404));
+
+                assert(tile.source_data.error);
+                assert.deepEqual(tile.source_data.layers, {});
+            });
+
+            it('leaves it empty with an error when missing_tile_layers aren\'t layers with properties', async () => {
+                const tile = await loadTile({ missing_tile_layers: { water: 'ocean' } }, getHttpError(404));
+
+                assert(tile.source_data.error);
+                assert.deepEqual(tile.source_data.layers, {});
+            });
+
+            it('doesn\'t fill a tile that failed to load for another reason', async () => {
+                const tile = await loadTile({ missing_tile_layers }, getHttpError(500));
+
+                assert(tile.source_data.error);
+                assert.deepEqual(tile.source_data.layers, {});
+            });
+
+            it('doesn\'t fill a tile that failed to load without a status (e.g. a network error)', async () => {
+                const tile = await loadTile({ missing_tile_layers }, new Error('There was a network error'));
+
+                assert(tile.source_data.error);
+                assert.deepEqual(tile.source_data.layers, {});
+            });
+
+            it('fills it when the server answers with one of missing_tile_statuses', async () => {
+                const source_options = { missing_tile_layers, missing_tile_statuses: [404, 500] };
+                const tile = await loadTile(source_options, getHttpError(500));
+
+                assert.isNull(tile.source_data.error);
+                assert.deepEqual(tile.source_data.layers.water.features[0].properties, missing_tile_layers.water);
+            });
+
+            it('doesn\'t fill a missing tile when its status isn\'t one of missing_tile_statuses', async () => {
+                const source_options = { missing_tile_layers, missing_tile_statuses: [500] };
+                const tile = await loadTile(source_options, getHttpError(404));
+
+                assert(tile.source_data.error);
+                assert.deepEqual(tile.source_data.layers, {});
+            });
+
+            it('keeps filling 404 tiles when missing_tile_statuses aren\'t statuses', async () => {
+                const source_options = { missing_tile_layers, missing_tile_statuses: '500' };
+                const tile = await loadTile(source_options, getHttpError(404));
+
+                assert.isNull(tile.source_data.error);
+                assert.lengthOf(tile.source_data.layers.water.features, 1);
+            });
+        });
+    });
+});
+
+describe('Utils.io(url)', () => {
+    let xhr;
+
+    beforeEach(() => {
+        xhr = sinon.useFakeXMLHttpRequest();
+        xhr.onCreate = request => setTimeout(() => request.respond(404, {}, 'Not Found'));
+    });
+
+    afterEach(() => {
+        xhr.restore();
+    });
+
+    it('rejects with the status of a failed request', async () => {
+        const error = await Utils.io('http://localhost:8080/14/1/2.mvt').then(
+            () => assert.fail('the request should fail'),
+            error => error
+        );
+
+        assert.equal(error.status, 404);
+        assert.include(error.message, '404');
     });
 });

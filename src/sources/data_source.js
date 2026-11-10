@@ -337,10 +337,22 @@ export class NetworkSource extends DataSource {
                     resolve(dest);
                 });
             }).catch((error) => {
-                source_data.error = error.stack;
+                const missing_tile_layers = error.status != null ? this.missingTileLayers(error.status) : null;
+                if (missing_tile_layers) {
+                    source_data.layers = missing_tile_layers;
+                }
+                else {
+                    source_data.error = error.stack;
+                }
                 resolve(dest); // resolve request but pass along error
             });
         });
+    }
+
+    // Layers of a tile the server answered with an HTTP error status for (e.g. 404, it doesn't have the tile),
+    // or null when such a tile stays empty (and is an error). Sub-classes can implement
+    missingTileLayers (/*status*/) {
+        return null;
     }
 
     validate (source) {
