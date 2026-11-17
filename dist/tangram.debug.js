@@ -177,7 +177,7 @@ function _createClass(e, r, t) {
   }), e;
 }
 
-var version$1 = "0.24.2";
+var version$1 = "0.24.3";
 
 var version = 'v' + version$1;
 
@@ -30890,7 +30890,7 @@ return index;
 // Script modules can't expose exports
 try {
 	Tangram.debug.ESM = false; // mark build as ES module
-	Tangram.debug.SHA = '099b36d3ada6644fed4f6f8fe7b7d4a6d415fac1';
+	Tangram.debug.SHA = '7d497b6a481607838d4e90114b8d89ef6955792a';
 	if (false === true && typeof window === 'object') {
 	    window.Tangram = Tangram;
 	}
