@@ -27709,6 +27709,12 @@ var TileManager = /*#__PURE__*/function () {
               return Promise.resolve(mainThreadLabelCollisionPass(tiles, _this2.collision.zoom, _this2.isLoadingVisibleTiles())).then(function ($await_1) {
                 try {
                   results = $await_1;
+                  // The scene was destroyed during the pass (e.g. the map was switched): nothing is left to draw
+                  if (!_this2.scene) {
+                    _this2.collision.task = null;
+                    topojson.Task.finish(task, results);
+                    return $return();
+                  }
                   _this2.scene.requestRedraw();
 
                   // Clear state to allow another collision pass to start
@@ -30884,7 +30890,7 @@ return index;
 // Script modules can't expose exports
 try {
 	Tangram.debug.ESM = false; // mark build as ES module
-	Tangram.debug.SHA = 'd8a433db1e25e52cfdcbd3a3e6fd26425c3f70cc';
+	Tangram.debug.SHA = '099b36d3ada6644fed4f6f8fe7b7d4a6d415fac1';
 	if (false === true && typeof window === 'object') {
 	    window.Tangram = Tangram;
 	}

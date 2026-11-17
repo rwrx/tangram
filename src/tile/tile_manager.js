@@ -174,6 +174,13 @@ export default class TileManager {
                 run: async task => {
                     // Do collision pass, then update view
                     const results = await mainThreadLabelCollisionPass(tiles, this.collision.zoom, this.isLoadingVisibleTiles());
+
+                    // The scene was destroyed during the pass (e.g. the map was switched): nothing is left to draw
+                    if (!this.scene) {
+                        this.collision.task = null;
+                        Task.finish(task, results);
+                        return;
+                    }
                     this.scene.requestRedraw();
 
                     // Clear state to allow another collision pass to start

@@ -25856,6 +25856,13 @@ class TileManager {
         run: async task => {
           // Do collision pass, then update view
           const results = await mainThreadLabelCollisionPass(tiles, this.collision.zoom, this.isLoadingVisibleTiles());
+
+          // The scene was destroyed during the pass (e.g. the map was switched): nothing is left to draw
+          if (!this.scene) {
+            this.collision.task = null;
+            topojson.Task.finish(task, results);
+            return;
+          }
           this.scene.requestRedraw();
 
           // Clear state to allow another collision pass to start
@@ -28652,7 +28659,7 @@ return index;
 // Script modules can't expose exports
 try {
 	Tangram.debug.ESM = true; // mark build as ES module
-	Tangram.debug.SHA = 'd8a433db1e25e52cfdcbd3a3e6fd26425c3f70cc';
+	Tangram.debug.SHA = '099b36d3ada6644fed4f6f8fe7b7d4a6d415fac1';
 	if (true === true && typeof window === 'object') {
 	    window.Tangram = Tangram;
 	}

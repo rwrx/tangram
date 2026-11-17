@@ -20,6 +20,29 @@ describe('TileManager', function () {
         scene = null;
     });
 
+    describe('.updateLabels()', () => {
+
+        beforeEach(() => scene.load());
+
+        it('finishes a label pass whose scene was destroyed meanwhile', async () => {
+            // A built tile without labels, the pass has nothing to place
+            tile_manager.renderable_tiles = [{
+                key: 'k', valid: true, built: true, build_id: 1, meshes: {}, pending_label_meshes: {},
+                coords: midtownTile, style_z: midtownTile.z, isProxy: () => false, swapPendingLabels: () => {},
+                min: { x: 0, y: 0 }, span: { x: 256, y: 256 }
+            }];
+            tile_manager.collision.zoom = null;
+
+            const pass = tile_manager.updateLabels();
+            tile_manager.destroy();
+            const results = await pass;
+
+            assert.isOk(results);
+            assert.isNull(tile_manager.collision.task);
+        });
+
+    });
+
     describe('.queueCoordinate(coords)', () => {
 
         let coords = midtownTile;
